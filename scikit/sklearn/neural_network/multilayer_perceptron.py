@@ -7,6 +7,7 @@
 # License: BSD 3 clause
 
 import numpy as np
+from IPython import embed
 
 from abc import ABCMeta, abstractmethod
 from scipy.optimize import fmin_l_bfgs_b
@@ -315,6 +316,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         return coef_init, intercept_init
 
     def _fit(self, X, y, incremental=False):
+        embed()
         warnings.warn("This is my fucking sklearn")
         # Make sure self.hidden_layer_sizes is a list
         hidden_layer_sizes = self.hidden_layer_sizes
