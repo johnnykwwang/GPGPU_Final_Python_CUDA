@@ -7,10 +7,13 @@
 # License: BSD 3 clause
 
 import numpy as np
+import cupy as cp
 from IPython import embed
 
 from abc import ABCMeta, abstractmethod
 from scipy.optimize import fmin_l_bfgs_b
+from accelerate.cuda.blas import Blas
+
 import warnings
 
 from ..base import BaseEstimator, ClassifierMixin, RegressorMixin
@@ -32,6 +35,7 @@ from ..utils.multiclass import type_of_target
 _STOCHASTIC_SOLVERS = ['sgd', 'adam']
 
 
+
 def _pack(coefs_, intercepts_):
     """Pack the parameters into a single vector."""
     return np.hstack([l.ravel() for l in coefs_ + intercepts_])
@@ -51,7 +55,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                  alpha, batch_size, learning_rate, learning_rate_init, power_t,
                  max_iter, loss, shuffle, random_state, tol, verbose,
                  warm_start, momentum, nesterovs_momentum, early_stopping,
-                 validation_fraction, beta_1, beta_2, epsilon):
+                 validation_fraction, beta_1, beta_2, epsilon, cuda):
         self.activation = activation
         self.solver = solver
         self.alpha = alpha
@@ -74,6 +78,9 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         self.beta_1 = beta_1
         self.beta_2 = beta_2
         self.epsilon = epsilon
+        self.cuda = cuda
+        if cuda:
+            self.activation += 'cuda'
 
     def _unpack(self, packed_parameters):
         """Extract the coefficients and intercepts from packed_parameters."""
@@ -115,6 +122,24 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
 
         return activations
 
+    def _forward_pass_gpu(self, activations):
+        hidden_activation = (ACTIVATIONS[self.activation])
+        # Iterate over the hidden layers
+        for i in range(self.n_layers_ - 1):
+            activations[i + 1] = cp.dot(activations[i],
+                                                 self.coefs_[i])
+            activations[i + 1] += self.intercepts_[i]
+
+            # For the hidden layers
+            if (i + 1) != (self.n_layers_ - 1):
+                activations[i + 1] = hidden_activation(activations[i + 1])
+
+        # For the last layer
+        output_activation = (ACTIVATIONS[self.out_activation_])
+        activations[i + 1] = output_activation(activations[i + 1])
+
+        return activations
+
     def _compute_loss_grad(self, layer, n_samples, activations, deltas,
                            coef_grads, intercept_grads):
         """Compute the gradient of loss with respect to coefs and intercept for
@@ -122,12 +147,21 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
 
         This function does backpropagation for the specified one layer.
         """
-        coef_grads[layer] = safe_sparse_dot(activations[layer].T,
+        if self.cuda:
+            # m = cp.array(activations[layer].T)
+            # n = cp.array(deltas[layer])
+            coef_grads[layer] = cp.asnumpy(cp.dot(m,n))
+        else:
+            coef_grads[layer] = safe_sparse_dot(activations[layer].T,
                                             deltas[layer])
+
         coef_grads[layer] += (self.alpha * self.coefs_[layer])
         coef_grads[layer] /= n_samples
 
-        intercept_grads[layer] = np.mean(deltas[layer], 0)
+        if self.cuda:
+            intercept_grads[layer] = cp.mean(deltas[layer], 0)
+        else:
+            intercept_grads[layer] = np.mean(deltas[layer], 0)
 
         return coef_grads, intercept_grads
 
@@ -221,7 +255,10 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         n_samples = X.shape[0]
 
         # Forward propagate
-        activations = self._forward_pass(activations)
+        if self.cuda:
+            activations = self._forward_pass_gpu(activations)
+        else:
+            activations = self._forward_pass(activations)
 
         # Get loss
         loss_func_name = self.loss
@@ -297,6 +334,10 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
             else:
                 self.best_loss_ = np.inf
 
+        if self.cuda:
+            self.coefs_ = cp.array(self.coefs_,copy=True)
+            self.intercepts_ = cp.array(self.intercepts_,copy=True)
+
     def _init_coef(self, fan_in, fan_out):
         if self.activation == 'logistic':
             # Use the initialization method recommended by
@@ -316,7 +357,6 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         return coef_init, intercept_init
 
     def _fit(self, X, y, incremental=False):
-        embed()
         warnings.warn("This is my fucking sklearn")
         # Make sure self.hidden_layer_sizes is a list
         hidden_layer_sizes = self.hidden_layer_sizes
@@ -486,7 +526,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
             elif self.solver == 'adam':
                 self._optimizer = AdamOptimizer(
                     params, self.learning_rate_init, self.beta_1, self.beta_2,
-                    self.epsilon)
+                    self.epsilon,self.cuda)
 
         # early_stopping in partial_fit doesn't make sense
         early_stopping = self.early_stopping and not incremental
@@ -508,8 +548,17 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
             batch_size = np.clip(self.batch_size, 1, n_samples)
 
         try:
+            if self.cuda:
+                ## Initialize CUDA memory
+                activations = cp.array(activations,copy=True)
+                deltas = cp.array(deltas,copy=True)
+                coef_grads = cp.array(coef_grads,copy=True)
+                intercept_grads = cp.array(intercept_grads,copy=True)
             for it in range(self.max_iter):
                 X, y = shuffle(X, y, random_state=self._random_state)
+                if self.cuda:
+                    X = cp.array(X,copy=True)
+                    y = cp.array(y,copy=True)
                 accumulated_loss = 0.0
                 for batch_slice in gen_batches(n_samples, batch_size):
                     activations[0] = X[batch_slice]
@@ -518,9 +567,11 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                         coef_grads, intercept_grads)
                     accumulated_loss += batch_loss * (batch_slice.stop -
                                                       batch_slice.start)
-
                     # update weights
                     grads = coef_grads + intercept_grads
+                    # if self.cuda:
+                    #     grads = grads.get()
+                    #TODO: this should port too
                     self._optimizer.update_params(grads)
 
                 self.n_iter_ += 1
@@ -889,7 +940,7 @@ class MLPClassifier(BaseMultilayerPerceptron, ClassifierMixin):
                  verbose=False, warm_start=False, momentum=0.9,
                  nesterovs_momentum=True, early_stopping=False,
                  validation_fraction=0.1, beta_1=0.9, beta_2=0.999,
-                 epsilon=1e-8):
+                 epsilon=1e-8, cuda = False):
 
         sup = super(MLPClassifier, self)
         sup.__init__(hidden_layer_sizes=hidden_layer_sizes,
@@ -902,7 +953,7 @@ class MLPClassifier(BaseMultilayerPerceptron, ClassifierMixin):
                      nesterovs_momentum=nesterovs_momentum,
                      early_stopping=early_stopping,
                      validation_fraction=validation_fraction,
-                     beta_1=beta_1, beta_2=beta_2, epsilon=epsilon)
+                     beta_1=beta_1, beta_2=beta_2, epsilon=epsilon, cuda = False)
 
     def _validate_input(self, X, y, incremental):
         X, y = check_X_y(X, y, accept_sparse=['csr', 'csc', 'coo'],
@@ -1261,7 +1312,8 @@ class MLPRegressor(BaseMultilayerPerceptron, RegressorMixin):
                  verbose=False, warm_start=False, momentum=0.9,
                  nesterovs_momentum=True, early_stopping=False,
                  validation_fraction=0.1, beta_1=0.9, beta_2=0.999,
-                 epsilon=1e-8):
+                 epsilon=1e-8, cuda = False):
+                
 
         sup = super(MLPRegressor, self)
         sup.__init__(hidden_layer_sizes=hidden_layer_sizes,
@@ -1274,7 +1326,8 @@ class MLPRegressor(BaseMultilayerPerceptron, RegressorMixin):
                      nesterovs_momentum=nesterovs_momentum,
                      early_stopping=early_stopping,
                      validation_fraction=validation_fraction,
-                     beta_1=beta_1, beta_2=beta_2, epsilon=epsilon)
+                     beta_1=beta_1, beta_2=beta_2, epsilon=epsilon, cuda = cuda)
+
 
     def predict(self, X):
         """Predict using the multi-layer perceptron model.

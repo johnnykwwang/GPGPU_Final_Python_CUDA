@@ -74,6 +74,9 @@ def relu(X):
     np.clip(X, 0, np.finfo(X.dtype).max, out=X)
     return X
 
+def relu_cuda(X):
+    cp.clip(X, 0, np.finfo(X.dtype).max, out=X)
+    return X
 
 def softmax(X):
     """Compute the K-way softmax function inplace.
@@ -96,7 +99,7 @@ def softmax(X):
 
 
 ACTIVATIONS = {'identity': identity, 'tanh': tanh, 'logistic': logistic,
-               'relu': relu, 'softmax': softmax}
+        'relu': relu, 'relu_cuda':relu_cuda, 'softmax': softmax}
 
 
 def inplace_identity_derivative(Z, delta):

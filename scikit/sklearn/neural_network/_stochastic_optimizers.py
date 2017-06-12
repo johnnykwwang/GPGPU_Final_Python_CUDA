@@ -5,6 +5,7 @@
 # License: BSD 3 clause
 
 import numpy as np
+import cupy as cp
 
 
 class BaseOptimizer(object):
@@ -229,7 +230,7 @@ class AdamOptimizer(BaseOptimizer):
     """
 
     def __init__(self, params, learning_rate_init=0.001, beta_1=0.9,
-                 beta_2=0.999, epsilon=1e-8):
+                 beta_2=0.999, epsilon=1e-8,cuda=False):
         super(AdamOptimizer, self).__init__(params, learning_rate_init)
 
         self.beta_1 = beta_1
@@ -238,6 +239,10 @@ class AdamOptimizer(BaseOptimizer):
         self.t = 0
         self.ms = [np.zeros_like(param) for param in params]
         self.vs = [np.zeros_like(param) for param in params]
+        self.cuda = cuda
+        if cuda:
+            self.ms = cp.array(self.ms,copy=True)
+            self.vs = cp.array(self.vs,copy=True)
 
     def _get_updates(self, grads):
         """Get the values used to update params with given gradients

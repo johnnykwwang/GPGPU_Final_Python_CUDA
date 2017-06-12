@@ -9,16 +9,26 @@ X, y = mnist.data / 255., mnist.target
 X_train, X_test = X[:60000], X[60000:]
 y_train, y_test = y[:60000], y[60000:]
 
+layers = (200,200)
+print(layers)
 
-mlp = MLPClassifier(hidden_layer_sizes=(50), max_iter=10, alpha=1e-4,
+mlp = MLPClassifier(hidden_layer_sizes=layers, max_iter=10, alpha=1e-4,
                     solver='sgd', verbose=10, tol=1e-4, random_state=1,
-                    learning_rate_init=.1)
+                    learning_rate_init=.1, cuda=True)
 t_0 = time.time()
 mlp.fit(X_train, y_train)
-print("Time: %f seconds" % (time.time()-t_0) )
+print("GPU Time: %f seconds" % (time.time()-t_0) )
 print("Training set score: %f" % mlp.score(X_train, y_train))
 print("Test set score: %f" % mlp.score(X_test, y_test))
 
+mlp = MLPClassifier(hidden_layer_sizes=layers, max_iter=10, alpha=1e-4,
+                    solver='sgd', verbose=10, tol=1e-4, random_state=1,
+                    learning_rate_init=.1, cuda=False)
+t_0 = time.time()
+mlp.fit(X_train, y_train)
+print("CPU Time: %f seconds" % (time.time()-t_0) )
+print("Training set score: %f" % mlp.score(X_train, y_train))
+print("Test set score: %f" % mlp.score(X_test, y_test))
 # fig, axes = plt.subplots(4, 4)
 
 # vmin, vmax = mlp.coefs_[0].min(), mlp.coefs_[0].max()
