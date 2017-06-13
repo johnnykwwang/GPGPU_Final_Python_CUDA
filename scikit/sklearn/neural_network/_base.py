@@ -5,6 +5,7 @@
 # License: BSD 3 clause
 
 import numpy as np
+import cupy as cp 
 
 from scipy.special import expit as logistic_sigmoid
 
@@ -97,9 +98,14 @@ def softmax(X):
 
     return X
 
+def softmax_cuda(X):
+    tmp = X - X.max(axis=1)[:, cp.newaxis]
+    cp.exp(tmp, out=X)
+    X /= X.sum(axis=1)[:, cp.newaxis]
+    return X
 
 ACTIVATIONS = {'identity': identity, 'tanh': tanh, 'logistic': logistic,
-        'relu': relu, 'relu_cuda':relu_cuda, 'softmax': softmax}
+        'relu': relu, 'relu_cuda':relu_cuda, 'softmax': softmax, 'softmax_cuda': softmax_cuda}
 
 
 def inplace_identity_derivative(Z, delta):
@@ -175,7 +181,9 @@ def inplace_relu_derivative(Z, delta):
 DERIVATIVES = {'identity': inplace_identity_derivative,
                'tanh': inplace_tanh_derivative,
                'logistic': inplace_logistic_derivative,
-               'relu': inplace_relu_derivative}
+               'relu': inplace_relu_derivative,
+               'relu_cuda':inplace_relu_derivative
+               }
 
 
 def squared_loss(y_true, y_pred):
@@ -224,6 +232,13 @@ def log_loss(y_true, y_prob):
 
     return -np.sum(y_true * np.log(y_prob)) / y_prob.shape[0]
 
+def log_loss_cuda(y_true, y_prob):
+    y_prob = cp.clip(y_prob, 1e-10, 1 - 1e-10)
+    if y_prob.shape[1] == 1:
+        y_prob = cp.append(1 - y_prob, y_prob, axis=1)
+    if y_true.shape[1] == 1:
+        y_true = cp.append(1 - y_true, y_true, axis=1)
+    return -cp.sum(y_true * cp.log(y_prob)) / y_prob.shape[0]
 
 def binary_log_loss(y_true, y_prob):
     """Compute binary logistic loss for classification.
@@ -250,6 +265,4 @@ def binary_log_loss(y_true, y_prob):
     return -np.sum(y_true * np.log(y_prob) +
                    (1 - y_true) * np.log(1 - y_prob)) / y_prob.shape[0]
 
-
-LOSS_FUNCTIONS = {'squared_loss': squared_loss, 'log_loss': log_loss,
-                  'binary_log_loss': binary_log_loss}
+LOSS_FUNCTIONS = {'squared_loss': squared_loss, 'log_loss': log_loss, 'log_loss_cuda': log_loss_cuda, 'binary_log_loss': binary_log_loss}

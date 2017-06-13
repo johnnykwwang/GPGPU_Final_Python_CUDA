@@ -80,7 +80,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         self.epsilon = epsilon
         self.cuda = cuda
         if cuda:
-            self.activation += 'cuda'
+            self.activation += '_cuda'
 
     def _unpack(self, packed_parameters):
         """Extract the coefficients and intercepts from packed_parameters."""
@@ -150,7 +150,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         if self.cuda:
             # m = cp.array(activations[layer].T)
             # n = cp.array(deltas[layer])
-            coef_grads[layer] = cp.asnumpy(cp.dot(m,n))
+            coef_grads[layer] = cp.dot(activations[layer].T,deltas[layer])
         else:
             coef_grads[layer] = safe_sparse_dot(activations[layer].T,
                                             deltas[layer])
@@ -264,10 +264,20 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         loss_func_name = self.loss
         if loss_func_name == 'log_loss' and self.out_activation_ == 'logistic':
             loss_func_name = 'binary_log_loss'
+        if self.cuda:
+            loss_func_name += '_cuda'
         loss = LOSS_FUNCTIONS[loss_func_name](y, activations[-1])
         # Add L2 regularization term to loss
-        values = np.sum(
-            np.array([np.dot(s.ravel(), s.ravel()) for s in self.coefs_]))
+
+        if self.cuda:
+            ## TODO: this is hard
+            values = sum([float(cp.sum(x)) for x in [cp.dot(s.ravel(), s.ravel()) for s in self.coefs_] ])
+            # values = cp.sum(
+            #     cp.array([cp.dot(s.ravel(), s.ravel()) for s in self.coefs_]))
+        else:
+            values = np.sum(
+                np.array([np.dot(s.ravel(), s.ravel()) for s in self.coefs_]))
+
         loss += (0.5 * self.alpha) * values / n_samples
 
         # Backward propagate
@@ -285,7 +295,11 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
 
         # Iterate over the hidden layers
         for i in range(self.n_layers_ - 2, 0, -1):
-            deltas[i - 1] = safe_sparse_dot(deltas[i], self.coefs_[i].T)
+            if self.cuda:
+                deltas[i - 1] = cp.dot(deltas[i], self.coefs_[i].T)
+            else:
+                deltas[i - 1] = safe_sparse_dot(deltas[i], self.coefs_[i].T)
+
             inplace_derivative = DERIVATIVES[self.activation]
             inplace_derivative(activations[i], deltas[i - 1])
 
@@ -315,6 +329,9 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         else:
             self.out_activation_ = 'logistic'
 
+        if self.cuda:
+            self.out_activation_ += '_cuda'
+
         # Initialize coefficient and intercept layers
         self.coefs_ = []
         self.intercepts_ = []
@@ -335,15 +352,16 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                 self.best_loss_ = np.inf
 
         if self.cuda:
-            self.coefs_ = cp.array(self.coefs_,copy=True)
-            self.intercepts_ = cp.array(self.intercepts_,copy=True)
+            self.coefs_ = [ cp.array(arr,copy=True) for arr in self.coefs_ ] 
+            self.intercepts_ = [ cp.array(arr,copy=True) for arr in self.intercepts_ ] 
 
     def _init_coef(self, fan_in, fan_out):
+        #TODO cp this
         if self.activation == 'logistic':
             # Use the initialization method recommended by
             # Glorot et al.
             init_bound = np.sqrt(2. / (fan_in + fan_out))
-        elif self.activation in ('identity', 'tanh', 'relu'):
+        elif self.activation in ('identity', 'tanh', 'relu','relu_cuda'):
             init_bound = np.sqrt(6. / (fan_in + fan_out))
         else:
             # this was caught earlier, just to make sure
@@ -357,7 +375,6 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         return coef_init, intercept_init
 
     def _fit(self, X, y, incremental=False):
-        warnings.warn("This is my fucking sklearn")
         # Make sure self.hidden_layer_sizes is a list
         hidden_layer_sizes = self.hidden_layer_sizes
         if not hasattr(hidden_layer_sizes, "__iter__"):
@@ -459,7 +476,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
             raise ValueError("epsilon must be > 0, got %s." % self.epsilon)
 
         # raise ValueError if not registered
-        supported_activations = ('identity', 'logistic', 'tanh', 'relu')
+        supported_activations = ('identity', 'logistic', 'tanh', 'relu','relu_cuda')
         if self.activation not in supported_activations:
             raise ValueError("The activation '%s' is not supported. Supported "
                              "activations are %s." % (self.activation,
@@ -522,7 +539,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
             if self.solver == 'sgd':
                 self._optimizer = SGDOptimizer(
                     params, self.learning_rate_init, self.learning_rate,
-                    self.momentum, self.nesterovs_momentum, self.power_t)
+                    self.momentum, self.nesterovs_momentum, self.power_t, self.cuda)
             elif self.solver == 'adam':
                 self._optimizer = AdamOptimizer(
                     params, self.learning_rate_init, self.beta_1, self.beta_2,
@@ -550,10 +567,10 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         try:
             if self.cuda:
                 ## Initialize CUDA memory
-                activations = cp.array(activations,copy=True)
-                deltas = cp.array(deltas,copy=True)
-                coef_grads = cp.array(coef_grads,copy=True)
-                intercept_grads = cp.array(intercept_grads,copy=True)
+                self.activations = [ cp.array(arr,copy=True) for arr in activations ] 
+                self.deltas = [ cp.array(arr,copy=True) for arr in deltas ] 
+                self.coef_grads = [ cp.array(arr,copy=True) for arr in coef_grads ] 
+                self.intercept_grads = [ cp.array(arr,copy=True) for arr in intercept_grads ] 
             for it in range(self.max_iter):
                 X, y = shuffle(X, y, random_state=self._random_state)
                 if self.cuda:
@@ -728,10 +745,17 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
             activations.append(np.empty((X.shape[0],
                                          layer_units[i + 1])))
         # forward propagate
-        self._forward_pass(activations)
+        if self.cuda:
+            activations = [cp.array(arr) for arr in activations]
+            activations = self._forward_pass_gpu(activations)
+        else:
+            activations = self._forward_pass(activations)
         y_pred = activations[-1]
 
-        return y_pred
+        if self.cuda:
+            return y_pred.get()
+        else:
+            return y_pred
 
 
 class MLPClassifier(BaseMultilayerPerceptron, ClassifierMixin):
@@ -953,7 +977,7 @@ class MLPClassifier(BaseMultilayerPerceptron, ClassifierMixin):
                      nesterovs_momentum=nesterovs_momentum,
                      early_stopping=early_stopping,
                      validation_fraction=validation_fraction,
-                     beta_1=beta_1, beta_2=beta_2, epsilon=epsilon, cuda = False)
+                     beta_1=beta_1, beta_2=beta_2, epsilon=epsilon, cuda = cuda )
 
     def _validate_input(self, X, y, incremental):
         X, y = check_X_y(X, y, accept_sparse=['csr', 'csc', 'coo'],

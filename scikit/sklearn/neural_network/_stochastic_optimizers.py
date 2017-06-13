@@ -6,6 +6,7 @@
 
 import numpy as np
 import cupy as cp
+from IPython import embed
 
 
 class BaseOptimizer(object):
@@ -117,14 +118,18 @@ class SGDOptimizer(BaseOptimizer):
     """
 
     def __init__(self, params, learning_rate_init=0.1, lr_schedule='constant',
-                 momentum=0.9, nesterov=True, power_t=0.5):
+                 momentum=0.9, nesterov=True, power_t=0.5, cuda=False ):
         super(SGDOptimizer, self).__init__(params, learning_rate_init)
 
         self.lr_schedule = lr_schedule
         self.momentum = momentum
         self.nesterov = nesterov
         self.power_t = power_t
-        self.velocities = [np.zeros_like(param) for param in params]
+        self.cuda = cuda
+        if cuda:
+            self.velocities = [cp.zeros_like(param) for param in params]
+        else:
+            self.velocities = [np.zeros_like(param) for param in params]
 
     def iteration_ends(self, time_step):
         """Perform updates to learning rate and potential other states at the
