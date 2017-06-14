@@ -18,12 +18,11 @@ from __future__ import division
 from math import log
 
 import numpy as np
-from scipy.misc import comb
 from scipy import sparse as sp
 
 from .expected_mutual_info_fast import expected_mutual_information
-from ...utils.fixes import bincount
 from ...utils.validation import check_array
+from ...utils.fixes import comb
 
 
 def comb2(n):
@@ -862,7 +861,7 @@ def entropy(labels):
     if len(labels) == 0:
         return 1.0
     label_idx = np.unique(labels, return_inverse=True)[1]
-    pi = bincount(label_idx).astype(np.float64)
+    pi = np.bincount(label_idx).astype(np.float64)
     pi = pi[pi > 0]
     pi_sum = np.sum(pi)
     # log(a / b) should be calculated as log(a) - log(b) for
