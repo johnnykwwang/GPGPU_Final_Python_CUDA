@@ -9,10 +9,10 @@
 import numpy as np
 import cupy as cp
 from IPython import embed
+import time
 
 from abc import ABCMeta, abstractmethod
 from scipy.optimize import fmin_l_bfgs_b
-from accelerate.cuda.blas import Blas
 
 import warnings
 
@@ -126,9 +126,9 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         hidden_activation = (ACTIVATIONS[self.activation])
         # Iterate over the hidden layers
         for i in range(self.n_layers_ - 1):
-            activations[i + 1] = cp.dot(activations[i],
-                                                 self.coefs_[i])
-            activations[i + 1] += self.intercepts_[i]
+            cp.dot(activations[i],self.coefs_[i],out=activations[i+1])
+            # activations[i + 1] += self.intercepts_[i]
+            cp.add(activations[i+1], self.intercepts_[i], out=activations[i+1])
 
             # For the hidden layers
             if (i + 1) != (self.n_layers_ - 1):
@@ -150,13 +150,20 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         if self.cuda:
             # m = cp.array(activations[layer].T)
             # n = cp.array(deltas[layer])
-            coef_grads[layer] = cp.dot(activations[layer].T,deltas[layer])
+            # coef_grads[layer] = cp.dot(activations[layer].T,deltas[layer])
+            cp.dot(activations[layer].T,deltas[layer],out=coef_grads[layer])
+            cp.add(coef_grads[layer],(self.alpha * self.coefs_[layer]),out=coef_grads[layer])
+            cp.divide(coef_grads[layer],n_samples,out=coef_grads[layer])
         else:
             coef_grads[layer] = safe_sparse_dot(activations[layer].T,
                                             deltas[layer])
+            coef_grads[layer] += (self.alpha * self.coefs_[layer])
+            coef_grads[layer] /= n_samples
 
-        coef_grads[layer] += (self.alpha * self.coefs_[layer])
-        coef_grads[layer] /= n_samples
+        # coef_grads[layer] += (self.alpha * self.coefs_[layer])
+        # cp.add(coef_grads[layer],(self.alpha * self.coefs_[layer]),out=coef_grads[layer])
+        # cp.divide(coef_grads[layer],n_samples,out=coef_grads[layer])
+        # coef_grads[layer] /= n_samples
 
         if self.cuda:
             intercept_grads[layer] = cp.mean(deltas[layer], 0)
@@ -271,12 +278,15 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
 
         if self.cuda:
             ## TODO: this is hard
-            values = sum([float(cp.sum(x)) for x in [cp.dot(s.ravel(), s.ravel()) for s in self.coefs_] ])
+            ## close this will make it faster but cause loss value incorrect
+            # values = sum([float(cp.sum(x)) for x in [cp.dot(s.ravel(), s.ravel()) for s in self.coefs_] ])
+            values = 0
             # values = cp.sum(
             #     cp.array([cp.dot(s.ravel(), s.ravel()) for s in self.coefs_]))
         else:
-            values = np.sum(
-                np.array([np.dot(s.ravel(), s.ravel()) for s in self.coefs_]))
+            values = 0
+            # values = np.sum(
+            #     np.array([np.dot(s.ravel(), s.ravel()) for s in self.coefs_]))
 
         loss += (0.5 * self.alpha) * values / n_samples
 
@@ -297,6 +307,8 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         for i in range(self.n_layers_ - 2, 0, -1):
             if self.cuda:
                 deltas[i - 1] = cp.dot(deltas[i], self.coefs_[i].T)
+                # embed()
+                # cp.dot(deltas[i], self.coefs_[i].T,deltas[i - 1])
             else:
                 deltas[i - 1] = safe_sparse_dot(deltas[i], self.coefs_[i].T)
 
@@ -562,23 +574,32 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         if self.batch_size == 'auto':
             batch_size = min(200, n_samples)
         else:
-            batch_size = np.clip(self.batch_size, 1, n_samples)
+            if self.cuda:
+                batch_size = cp.clip(self.batch_size, 1, n_samples)
+            else:
+                batch_size = np.clip(self.batch_size, 1, n_samples)
 
         try:
             if self.cuda:
                 ## Initialize CUDA memory
-                self.activations = [ cp.array(arr,copy=True) for arr in activations ] 
-                self.deltas = [ cp.array(arr,copy=True) for arr in deltas ] 
-                self.coef_grads = [ cp.array(arr,copy=True) for arr in coef_grads ] 
-                self.intercept_grads = [ cp.array(arr,copy=True) for arr in intercept_grads ] 
+                activations = [ cp.array(arr,copy=True) for arr in activations ] 
+                deltas = [ cp.array(arr,copy=True) for arr in deltas ] 
+                coef_grads = [ cp.array(arr,copy=True) for arr in coef_grads ] 
+                intercept_grads = [ cp.array(arr,copy=True) for arr in intercept_grads ] 
             for it in range(self.max_iter):
+                #TODO: port shuffle
+                t_0 = time.time()
                 X, y = shuffle(X, y, random_state=self._random_state)
                 if self.cuda:
                     X = cp.array(X,copy=True)
                     y = cp.array(y,copy=True)
+                print("[shuffle] Time: %f seconds" % (time.time()-t_0) )
                 accumulated_loss = 0.0
+                t_bkp = 0
+                t_upp = 0
                 for batch_slice in gen_batches(n_samples, batch_size):
                     activations[0] = X[batch_slice]
+                    t_0 = time.time()
                     batch_loss, coef_grads, intercept_grads = self._backprop(
                         X[batch_slice], y[batch_slice], activations, deltas,
                         coef_grads, intercept_grads)
@@ -586,10 +607,18 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                                                       batch_slice.start)
                     # update weights
                     grads = coef_grads + intercept_grads
+                    t_1 = time.time()
                     # if self.cuda:
                     #     grads = grads.get()
                     #TODO: this should port too
+                    # t_0 = time.time()
                     self._optimizer.update_params(grads)
+                    t_2 = time.time()
+                    t_bkp += t_1 - t_0
+                    t_upp += t_2 - t_1
+                    # print("[update_params] Time: %f seconds" % (time.time()-t_0) )
+                print("[batch prop ] Time: %f seconds" % (t_bkp) )
+                print("[update] Time: %f seconds" % (t_upp) )
 
                 self.n_iter_ += 1
                 self.loss_ = accumulated_loss / X.shape[0]

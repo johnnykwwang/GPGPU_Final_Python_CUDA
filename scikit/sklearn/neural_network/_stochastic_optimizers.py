@@ -128,8 +128,15 @@ class SGDOptimizer(BaseOptimizer):
         self.cuda = cuda
         if cuda:
             self.velocities = [cp.zeros_like(param) for param in params]
+            self.update_params_cuda = cp.ElementwiseKernel(
+                    'raw T m, raw T v, raw T lr, raw T grad',
+                    'raw T u',
+                    'u = m*v-lr*grad',
+                    'update_params_cuda'
+                    )
         else:
             self.velocities = [np.zeros_like(param) for param in params]
+
 
     def iteration_ends(self, time_step):
         """Perform updates to learning rate and potential other states at the
@@ -162,6 +169,8 @@ class SGDOptimizer(BaseOptimizer):
                 print(msg + " Stopping.")
             return True
 
+
+
     def _get_updates(self, grads):
         """Get the values used to update params with given gradients
 
@@ -176,8 +185,13 @@ class SGDOptimizer(BaseOptimizer):
         updates : list, length = len(grads)
             The values to add to params
         """
+        # if self.cuda:
+        #     embed()
+        #     updates = self.update_params_cuda(self.momentum,self.velocities,self.learning_rate, grads)
+        # else:
         updates = [self.momentum * velocity - self.learning_rate * grad
-                   for velocity, grad in zip(self.velocities, grads)]
+                    for velocity, grad in zip(self.velocities, grads)]
+
         self.velocities = updates
 
         if self.nesterov:
