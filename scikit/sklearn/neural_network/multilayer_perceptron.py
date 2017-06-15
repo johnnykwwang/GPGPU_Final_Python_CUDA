@@ -783,41 +783,66 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                         if self.useCuda:
                             cuda_activations[0] = cuda_X[batch_slice]
                             
-                            ts = time.clock()
+                            
                             batch_loss, coef_grads_cuda_ret, intercept_grads_cuda_ret = self._backprop_cuda(
                                 cuda_X[batch_slice], cuda_y[batch_slice], cuda_activations, cuda_deltas,
                                 cuda_coef_grads, cuda_intercept_grads)
                             
                             
                             
-                            if PRINT_FIRST_BATCH_TIME:
-                                PRINT_FIRST_BATCH_TIME = False
-                                print("First batch time: %f ms" % (1000 * (time.clock()- ts)))
-                            else:
-                                if batch_slice.stop - batch_slice.start ==  batch_size:
-                                    batch_time_total += time.clock() - ts
-                                    batch_time_count += 1
+                            
 
+                            ts = time.clock()
+
+                            ts_tr = time.clock()
                             # Transfer back to CPU
                             coef_grads = [ gpu.get() for gpu in cuda_coef_grads]
                             intercept_grads = [ gpu.get() for gpu in cuda_intercept_grads]
-
-                        else:
-                            activations[0] = X[batch_slice]
-                            ts = time.clock()
-                            batch_loss, coef_grads, intercept_grads = self._backprop(
-                                X[batch_slice], y[batch_slice], activations, deltas,
-                                coef_grads, intercept_grads)
+                            print("transfer time: %f ms" % (1000 * (time.clock()- ts_tr)))
                             
+
+                            # update weights
+                            grads = coef_grads + intercept_grads
+                            
+                            ts_update = time.clock()
+                            self._optimizer.update_params(grads) 
+                            print("update time: %f ms" % (1000 * (time.clock()- ts_update)))
+
                             if PRINT_FIRST_BATCH_TIME:
                                 PRINT_FIRST_BATCH_TIME = False
-                                print("First batch time: %f ms" % (1000 * (time.clock()- ts)))
+                                print("First update time: %f ms" % (1000 * (time.clock()- ts)))
                             else:
                                 if batch_slice.stop - batch_slice.start ==  batch_size:
                                     batch_time_total += time.clock() - ts
                                     batch_time_count += 1
+
+
+                        else:
+                            activations[0] = X[batch_slice]
                             
-                    
+                            batch_loss, coef_grads, intercept_grads = self._backprop(
+                                X[batch_slice], y[batch_slice], activations, deltas,
+                                coef_grads, intercept_grads)
+                                
+                            
+                            
+                            ts = time.clock()
+                            # update weights
+                            grads = coef_grads + intercept_grads
+                            
+                            ts_update = time.clock()
+                            self._optimizer.update_params(grads) 
+                            print("update time: %f ms" % (1000 * (time.clock()- ts_update))) 
+
+                            if PRINT_FIRST_BATCH_TIME:
+                                PRINT_FIRST_BATCH_TIME = False
+                                print("First update time: %f ms" % (1000 * (time.clock()- ts)))
+                            else:
+                                if batch_slice.stop - batch_slice.start ==  batch_size:
+                                    batch_time_total += time.clock() - ts
+                                    batch_time_count += 1
+
+
                     # Dump to file
                     if DUMP_TO_FILE:
                         DUMP_TO_FILE = False
@@ -842,10 +867,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                     # Other stuff
                     accumulated_loss += batch_loss * (batch_slice.stop -
                                                       batch_slice.start)
-                    # update weights
-                    grads = coef_grads + intercept_grads
                     
-                    self._optimizer.update_params(grads) 
 
                     
                     # Copy new params to GPU
@@ -859,7 +881,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                     
                     
                 
-                print("Avg batch time: %f ms, %d slices, total %f ms" % (batch_time_total * 1000 / batch_time_count , batch_time_count,  batch_time_total * 1000))
+                print("Avg update time: %f ms, %d slices, total %f ms" % (batch_time_total * 1000 / batch_time_count , batch_time_count,  batch_time_total * 1000))
 
                 self.n_iter_ += 1
                 self.loss_ = accumulated_loss / X.shape[0]
