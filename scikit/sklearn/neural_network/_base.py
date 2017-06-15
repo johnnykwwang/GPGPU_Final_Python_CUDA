@@ -4,6 +4,7 @@
 # Author: Issam H. Laradji <issam.laradji@gmail.com>
 # License: BSD 3 clause
 
+import time
 import numpy as np
 import cupy as cp
 import pdb
@@ -113,6 +114,13 @@ def softmax(X):
 
     return X
 
+kernel_softmax = cp.ElementwiseKernel(
+    'float64 max_x',
+    'float64 x',
+    'x = exp(x - max_x)',
+    'kernel_softmax'
+)
+
 def softmax_cuda(X):
     """Compute the K-way softmax function inplace.
 
@@ -126,9 +134,10 @@ def softmax_cuda(X):
     X_new : {array-like, sparse matrix}, shape (n_samples, n_features)
         The transformed data.
     """
-    tmp = X - X.max(axis=1)[:, cp.newaxis]
-    cp.exp(tmp, out=X)
-    X /= X.sum(axis=1)[:, cp.newaxis]
+    
+    kernel_softmax(X.max(axis=1)[:, cp.newaxis], X)
+    x_sum = X.sum(axis=1)[:, cp.newaxis] 
+    cp.divide(X, x_sum, out=X)
 
     return X
 
@@ -286,6 +295,17 @@ def log_loss(y_true, y_prob):
 
     return -np.sum(y_true * np.log(y_prob)) / y_prob.shape[0]
 
+
+kernel_log_loss = cp.ReductionKernel(
+    'float64 y_true, float64 y_prob, float64 size',
+    'float64 val',
+    'y_true * log( min(max(y_prob,1e-10),1 - 1e-10) ) * -1.0',
+    'a + b',
+    'val = a / size',
+    '0',
+    'kernel_log_loss'
+)
+
 def log_loss_cuda(y_true, y_prob):
     """Compute Logistic loss for classification.
 
@@ -303,7 +323,8 @@ def log_loss_cuda(y_true, y_prob):
     loss : float
         The degree to which the samples are correctly predicted.
     """
-    y_prob = cp.clip(y_prob, 1e-10, 1 - 1e-10)
+ 
+    #y_prob = cp.clip(y_prob, 1e-10, 1 - 1e-10) # Optimized
 
     if y_prob.shape[1] == 1:
         y_prob = cp.append(1 - y_prob, y_prob, axis=1)
@@ -311,13 +332,11 @@ def log_loss_cuda(y_true, y_prob):
     if y_true.shape[1] == 1:
         y_true = cp.append(1 - y_true, y_true, axis=1)
 
-    
-    try:
-        val = -cp.sum(y_true * cp.log(y_prob)) / y_prob.shape[0]
-        return val
-    except:
-        pdb.set_trace()
-    
+    #val = -cp.sum(y_true * cp.log(y_prob)) / y_prob.shape[0] # Optimized
+
+    val = kernel_log_loss(y_true, y_prob, y_prob.shape[0]) # Optimization Kernel
+    return val
+
 
 def binary_log_loss(y_true, y_prob):
     """Compute binary logistic loss for classification.
