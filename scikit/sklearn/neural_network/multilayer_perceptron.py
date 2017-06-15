@@ -164,7 +164,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                 activations[i + 1] = hidden_activation(activations[i + 1])
 
         # For the last layer
-        output_activation = ACTIVATIONS[self.out_activation_]
+        output_activation = ACTIVATIONS[self.out_activation_ + "_cuda"]
         activations[i + 1] = output_activation(activations[i + 1])
         return activations
 
@@ -316,6 +316,17 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         return loss, coef_grads, intercept_grads
 
 
+
+    kernel_l2_regularization = cp.ReductionKernel(
+        'T x',
+        'T y',
+        'x*x',
+        'a + b',
+        'y = a',
+        '0',
+        'kernel_l2_regularization'
+    )
+
     def _backprop_cuda(self, X, y, activations, deltas, coef_grads,
                   intercept_grads):
         """Compute the MLP loss function and its corresponding derivatives
@@ -353,11 +364,14 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         coef_grads : list, length = n_layers - 1
         intercept_grads : list, length = n_layers - 1
         """
+        tss = time.clock()
         n_samples = X.shape[0]
 
         # Forward propagate
+        ts = time.clock()
         activations = self._forward_pass_cuda(activations)
-        
+        print("forward time: %f ms" % (1000 * (time.clock()- ts)))
+
         # Get loss
         loss_func_name = self.loss
         
@@ -368,15 +382,20 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
 
         
         
-        loss = LOSS_FUNCTIONS[loss_func_name](y, activations[-1])
-        # Add L2 regularization term to loss
-
-        values = cp.float64(0)
-        for s in self.cuda_coefs_:
-            ravel = s.ravel()
-            values += cp.dot(ravel, ravel)
         
-        loss += (0.5 * self.alpha) * values.get() / n_samples
+        loss = LOSS_FUNCTIONS[loss_func_name](y, activations[-1])
+        
+        # Add L2 regularization term to loss
+        
+        ts = time.clock()
+        values = np.float64(0)
+        
+        for s in self.cuda_coefs_:
+            values += self.kernel_l2_regularization(s.ravel())
+
+        
+        loss += (0.5 * self.alpha) * values / n_samples
+        print("loss time: %f ms" % (1000 * (time.clock()- ts)))
         
         # Backward propagate
         last = self.n_layers_ - 2
@@ -385,7 +404,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         # combinations of output activation and loss function:
         # sigmoid and binary cross entropy, softmax and categorical cross
         # entropy, and identity with squared loss
-
+        
         
         cp.subtract(activations[-1], y, out=deltas[last])
         
@@ -406,6 +425,8 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                 i - 1, n_samples, activations, deltas, coef_grads,
                 intercept_grads)
 
+        
+        print("backprop time: %f ms" % (1000 * (time.clock()- tss)))
         return loss, coef_grads, intercept_grads
 
     def _initialize(self, y, layer_units):
@@ -428,8 +449,6 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         else:
             self.out_activation_ = 'logistic'
 
-        if self.useCuda:
-            self.out_activation_ += '_cuda'
         # Initialize coefficient and intercept layers
         self.coefs_ = []
         self.intercepts_ = []
@@ -840,8 +859,8 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                             self.cuda_coefs_[i].set(self.coefs_[i])
                         for i in range(0, len(self.intercepts_)):
                             self.cuda_intercepts_[i].set(self.intercepts_[i])
-                    #if batch_slice.start > 1000:
-                    #    break # FIXME:force one batch
+                    if batch_slice.start > 1000:
+                        break # FIXME:force one batch
                     
                     
                 
