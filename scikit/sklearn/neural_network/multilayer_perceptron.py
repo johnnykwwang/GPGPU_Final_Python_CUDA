@@ -105,6 +105,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
             logistic function
         """
         hidden_activation = ACTIVATIONS[self.activation]
+        
         # Iterate over the hidden layers
         for i in range(self.n_layers_ - 1):
             activations[i + 1] = safe_sparse_dot(activations[i],
@@ -155,11 +156,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         hidden_activation = ACTIVATIONS[self.activation]
         # Iterate over the hidden layers
         for i in range(self.n_layers_ - 1):
-            try:
-                cp.dot(activations[i], self.cuda_coefs_[i], out=activations[i+1])
-            except:
-                pdb.set_trace()
-            #pdb.set_trace()
+            cp.dot(activations[i], self.cuda_coefs_[i], out=activations[i+1])
             activations[i + 1] += self.cuda_intercepts_[i]
 
             # For the hidden layers
@@ -169,7 +166,6 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         # For the last layer
         output_activation = ACTIVATIONS[self.out_activation_]
         activations[i + 1] = output_activation(activations[i + 1])
-
         return activations
 
     
@@ -289,12 +285,8 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         n_samples = X.shape[0]
 
         # Forward propagate
-        #pdb.set_trace()
         tss = time.clock()
-        ts = time.clock()
         activations = self._forward_pass(activations)
-        if self.fitting:
-            print("CPU Foward pass: %f ms \n" % ((time.clock() - ts) * 1000))
 
         ts = time.clock()
         # Get loss
@@ -344,7 +336,6 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                 intercept_grads)
 
         if self.fitting:
-            print("CPU iterating: %f ms \n" % ((time.clock() - ts) * 1000))
             print("CPU Total Backprop: %f ms \n" % ((time.clock() - tss) * 1000))
         return loss, coef_grads, intercept_grads
 
@@ -386,18 +377,9 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         intercept_grads : list, length = n_layers - 1
         """
         n_samples = X.shape[0]
-        tss = time.clock()
-        
-        #pdb.set_trace()
+
         # Forward propagate
-        
-        ts = time.clock()
         activations = self._forward_pass_cuda(activations)
-        if self.fitting:
-            pass
-            #print("GPU Foward pass: %f ms \n" % ((time.clock() - ts) * 1000)) 
-
-
         
         # Get loss
         loss_func_name = self.loss
@@ -412,25 +394,10 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         loss = LOSS_FUNCTIONS[loss_func_name](y, activations[-1])
         # Add L2 regularization term to loss
 
-        ts = time.clock()
-        #if self.fitting:
-        #    print("GPU process loss function: %f ms \n" % ((time.clock() - ts) * 1000)) 
-        #ts = time.clock()
         values = cp.float64(0)
         for s in self.cuda_coefs_:
-            #ts = time.clock()
             ravel = s.ravel()
-            #if self.fitting:
-            #    print("GPU ravel function: %f ms \n" % ((time.clock() - ts) * 1000)) 
-            #ts = time.clock()
             values += cp.dot(ravel, ravel)
-            #if self.fitting:
-            #    print("GPU dot function: %f ms \n" % ((time.clock() - ts) * 1000)) 
-
-        if self.fitting:
-            pass
-            #print("GPU process regularization function: %f ms \n" % ((time.clock() - ts) * 1000)) 
-            
         
         loss += (0.5 * self.alpha) * values.get() / n_samples
         
@@ -441,16 +408,11 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         # combinations of output activation and loss function:
         # sigmoid and binary cross entropy, softmax and categorical cross
         # entropy, and identity with squared loss
-        ts = time.clock()
 
-        deltas[last] = activations[-1] - y
-
-        if self.fitting:
-            pass
-            #print("GPU process loss function: %f ms \n" % ((time.clock() - ts) * 1000)) 
+        
+        cp.subtract(activations[-1], y, out=deltas[last])
         
         
-        ts = time.clock()
         # Compute gradient for the last layer
         coef_grads, intercept_grads = self._compute_loss_grad_cuda(
             last, n_samples, activations, deltas, coef_grads, intercept_grads)
@@ -460,21 +422,13 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         for i in range(self.n_layers_ - 2, 0, -1):
             cp.dot(deltas[i], self.cuda_coefs_[i].T, out=deltas[i - 1])
             
-            #pdb.set_trace()
-            #t_derivative = time.clock()
             inplace_derivative = DERIVATIVES[self.activation]
             inplace_derivative(activations[i], deltas[i - 1])
-
-            #print("GPU derivative: %f ms \n" % ((time.clock() - t_derivative) * 1000))
-
 
             coef_grads, intercept_grads = self._compute_loss_grad_cuda(
                 i - 1, n_samples, activations, deltas, coef_grads,
                 intercept_grads)
 
-        if self.fitting:
-            print("GPU iterating: %f ms \n" % ((time.clock() - ts) * 1000))
-            print("GPU Total Backprop: %f ms \n" % ((time.clock() - tss) * 1000))
         return loss, coef_grads, intercept_grads
 
     def _initialize(self, y, layer_units):
@@ -700,11 +654,6 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
 
         self._unpack(optimal_parameters)
 
-    def _partial_copy_cuda(self, dst, src, batch_slice):
-        element_size = src.dtype.itemsize
-        src_ptr = cp.cuda.MemoryPointer(src.data.mem, offset=element_size * batch_slice.start)
-        dst.data.copy_from_device(src_ptr, element_size * (batch_slice.stop - batch_slice.start ))
-
     def _fit_stochastic(self, X, y, activations, deltas, coef_grads,
                         intercept_grads, layer_units, incremental):
 
@@ -841,26 +790,26 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                     else:
                         # compute them directly
                         if self.useCuda:
-
-                            #pdb.set_trace()
-                            #self._partial_copy_cuda(cuda_activations[0], cuda_X, batch_slice)
                             cuda_activations[0] = cuda_X[batch_slice]
-                            
-                            
                             
                             ts = time.clock()
                             batch_loss, coef_grads_cuda_ret, intercept_grads_cuda_ret = self._backprop_cuda(
                                 cuda_X[batch_slice], cuda_y[batch_slice], cuda_activations, cuda_deltas,
                                 cuda_coef_grads, cuda_intercept_grads)
                             
+                            
+                            
                             if PRINT_FIRST_BATCH_TIME:
                                 PRINT_FIRST_BATCH_TIME = False
                                 print("First batch time: %f ms" % (1000 * (time.clock()- ts)))
-                            # Transfer back to CPU
+                            else:
+                                if batch_slice.stop - batch_slice.start ==  batch_size:
+                                    batch_time_total += time.clock() - ts
+                                    batch_time_count += 1
 
+                            # Transfer back to CPU
                             coef_grads = [ gpu.get() for gpu in cuda_coef_grads]
                             intercept_grads = [ gpu.get() for gpu in cuda_intercept_grads]
-                            #pdb.set_trace()
 
                         else:
                             activations[0] = X[batch_slice]
@@ -868,11 +817,15 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                             batch_loss, coef_grads, intercept_grads = self._backprop(
                                 X[batch_slice], y[batch_slice], activations, deltas,
                                 coef_grads, intercept_grads)
+                            
                             if PRINT_FIRST_BATCH_TIME:
                                 PRINT_FIRST_BATCH_TIME = False
                                 print("First batch time: %f ms" % (1000 * (time.clock()- ts)))
+                            else:
+                                if batch_slice.stop - batch_slice.start ==  batch_size:
+                                    batch_time_total += time.clock() - ts
+                                    batch_time_count += 1
                             
-                    
                     
                     # Dump to file
                     if DUMP_TO_FILE:
@@ -903,9 +856,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                     
                     self._optimizer.update_params(grads) 
 
-                    if batch_slice.stop - batch_slice.start ==  batch_size:
-                        batch_time_total += time.clock() - ts
-                        batch_time_count += 1
+                    
                     # Copy new params to GPU
                     if self.useCuda:
                         for i in range(0, len(self.coefs_)):
