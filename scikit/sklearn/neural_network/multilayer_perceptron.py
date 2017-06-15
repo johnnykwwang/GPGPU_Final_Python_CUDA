@@ -8,12 +8,9 @@
 
 import numpy as np
 import cupy as cp
-from IPython import embed
 
 from abc import ABCMeta, abstractmethod
 from scipy.optimize import fmin_l_bfgs_b
-from accelerate.cuda.blas import Blas
-
 import warnings
 
 from ..base import BaseEstimator, ClassifierMixin, RegressorMixin
@@ -31,9 +28,10 @@ from ..utils.validation import check_is_fitted
 from ..utils.multiclass import _check_partial_fit_first_call, unique_labels
 from ..utils.multiclass import type_of_target
 
+import time
+import pdb
 
 _STOCHASTIC_SOLVERS = ['sgd', 'adam']
-
 
 
 def _pack(coefs_, intercepts_):
@@ -55,7 +53,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                  alpha, batch_size, learning_rate, learning_rate_init, power_t,
                  max_iter, loss, shuffle, random_state, tol, verbose,
                  warm_start, momentum, nesterovs_momentum, early_stopping,
-                 validation_fraction, beta_1, beta_2, epsilon, cuda):
+                 validation_fraction, beta_1, beta_2, epsilon, useCuda):
         self.activation = activation
         self.solver = solver
         self.alpha = alpha
@@ -78,8 +76,9 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         self.beta_1 = beta_1
         self.beta_2 = beta_2
         self.epsilon = epsilon
-        self.cuda = cuda
-        if cuda:
+        self.useCuda = useCuda
+        self.fitting = False
+        if self.useCuda:
             self.activation += '_cuda'
 
     def _unpack(self, packed_parameters):
@@ -110,6 +109,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         for i in range(self.n_layers_ - 1):
             activations[i + 1] = safe_sparse_dot(activations[i],
                                                  self.coefs_[i])
+            
             activations[i + 1] += self.intercepts_[i]
 
             # For the hidden layers
@@ -122,24 +122,6 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
 
         return activations
 
-    def _forward_pass_gpu(self, activations):
-        hidden_activation = (ACTIVATIONS[self.activation])
-        # Iterate over the hidden layers
-        for i in range(self.n_layers_ - 1):
-            activations[i + 1] = cp.dot(activations[i],
-                                                 self.coefs_[i])
-            activations[i + 1] += self.intercepts_[i]
-
-            # For the hidden layers
-            if (i + 1) != (self.n_layers_ - 1):
-                activations[i + 1] = hidden_activation(activations[i + 1])
-
-        # For the last layer
-        output_activation = (ACTIVATIONS[self.out_activation_])
-        activations[i + 1] = output_activation(activations[i + 1])
-
-        return activations
-
     def _compute_loss_grad(self, layer, n_samples, activations, deltas,
                            coef_grads, intercept_grads):
         """Compute the gradient of loss with respect to coefs and intercept for
@@ -147,21 +129,73 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
 
         This function does backpropagation for the specified one layer.
         """
-        if self.cuda:
-            # m = cp.array(activations[layer].T)
-            # n = cp.array(deltas[layer])
-            coef_grads[layer] = cp.dot(activations[layer].T,deltas[layer])
-        else:
-            coef_grads[layer] = safe_sparse_dot(activations[layer].T,
+        coef_grads[layer] = safe_sparse_dot(activations[layer].T,
                                             deltas[layer])
-
         coef_grads[layer] += (self.alpha * self.coefs_[layer])
         coef_grads[layer] /= n_samples
 
-        if self.cuda:
-            intercept_grads[layer] = cp.mean(deltas[layer], 0)
-        else:
-            intercept_grads[layer] = np.mean(deltas[layer], 0)
+        intercept_grads[layer] = np.mean(deltas[layer], 0)
+
+        return coef_grads, intercept_grads
+
+    def _forward_pass_cuda(self, activations):
+        """Perform a forward pass on the network by computing the values
+        of the neurons in the hidden layers and the output layer.
+
+        Parameters
+        ----------
+        activations : list, length = n_layers - 1
+            The ith element of the list holds the values of the ith layer.
+
+        with_output_activation : bool, default True
+            If True, the output passes through the output activation
+            function, which is either the softmax function or the
+            logistic function
+        """
+        hidden_activation = ACTIVATIONS[self.activation]
+        # Iterate over the hidden layers
+        for i in range(self.n_layers_ - 1):
+            try:
+                cp.dot(activations[i], self.cuda_coefs_[i], out=activations[i+1])
+            except:
+                pdb.set_trace()
+            #pdb.set_trace()
+            activations[i + 1] += self.cuda_intercepts_[i]
+
+            # For the hidden layers
+            if (i + 1) != (self.n_layers_ - 1):
+                activations[i + 1] = hidden_activation(activations[i + 1])
+
+        # For the last layer
+        output_activation = ACTIVATIONS[self.out_activation_]
+        activations[i + 1] = output_activation(activations[i + 1])
+
+        return activations
+
+    
+    kernel_compute_loss_grad_cuda = cp.ElementwiseKernel(
+        'float64 coefs, float64 alpha, float64 n_samples',
+        'float64 coef_grads',
+        'coef_grads = (coef_grads + alpha * coefs)/ n_samples',
+        'kernel_compute_loss_grad_cuda')
+
+    def _compute_loss_grad_cuda(self, layer, n_samples, activations, deltas,
+                           coef_grads, intercept_grads):
+        """Compute the gradient of loss with respect to coefs and intercept for
+        specified layer.
+
+        This function does backpropagation for the specified one layer.
+        """
+        cp.dot(activations[layer].T, deltas[layer], out=coef_grads[layer])
+
+        # Original
+        #coef_grads[layer] += (self.alpha * self.cuda_coefs_[layer])
+        #coef_grads[layer] /= n_samples
+        # Optimized
+        self.kernel_compute_loss_grad_cuda(self.cuda_coefs_[layer], self.alpha, n_samples,coef_grads[layer])
+        # End of optimization
+
+        cp.mean(deltas[layer], 0, out=intercept_grads[layer])
 
         return coef_grads, intercept_grads
 
@@ -255,30 +289,27 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         n_samples = X.shape[0]
 
         # Forward propagate
-        if self.cuda:
-            activations = self._forward_pass_gpu(activations)
-        else:
-            activations = self._forward_pass(activations)
+        #pdb.set_trace()
+        tss = time.clock()
+        ts = time.clock()
+        activations = self._forward_pass(activations)
+        if self.fitting:
+            print("CPU Foward pass: %f ms \n" % ((time.clock() - ts) * 1000))
 
+        ts = time.clock()
         # Get loss
         loss_func_name = self.loss
         if loss_func_name == 'log_loss' and self.out_activation_ == 'logistic':
             loss_func_name = 'binary_log_loss'
-        if self.cuda:
-            loss_func_name += '_cuda'
         loss = LOSS_FUNCTIONS[loss_func_name](y, activations[-1])
         # Add L2 regularization term to loss
-
-        if self.cuda:
-            ## TODO: this is hard
-            values = sum([float(cp.sum(x)) for x in [cp.dot(s.ravel(), s.ravel()) for s in self.coefs_] ])
-            # values = cp.sum(
-            #     cp.array([cp.dot(s.ravel(), s.ravel()) for s in self.coefs_]))
-        else:
-            values = np.sum(
-                np.array([np.dot(s.ravel(), s.ravel()) for s in self.coefs_]))
-
+        ts = time.clock()
+        values = np.sum(
+            np.array([np.dot(s.ravel(), s.ravel()) for s in self.coefs_]))
         loss += (0.5 * self.alpha) * values / n_samples
+
+        if self.fitting:
+            print("CPU process regularization function: %f ms \n" % ((time.clock() - ts) * 1000)) 
 
         # Backward propagate
         last = self.n_layers_ - 2
@@ -287,19 +318,24 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         # combinations of output activation and loss function:
         # sigmoid and binary cross entropy, softmax and categorical cross
         # entropy, and identity with squared loss
+        
+        ts = time.clock()
         deltas[last] = activations[-1] - y
+
+        if self.fitting:
+            print("CPU process delta function: %f ms \n" % ((time.clock() - ts) * 1000)) 
+
+        
+        
 
         # Compute gradient for the last layer
         coef_grads, intercept_grads = self._compute_loss_grad(
             last, n_samples, activations, deltas, coef_grads, intercept_grads)
 
+
         # Iterate over the hidden layers
         for i in range(self.n_layers_ - 2, 0, -1):
-            if self.cuda:
-                deltas[i - 1] = cp.dot(deltas[i], self.coefs_[i].T)
-            else:
-                deltas[i - 1] = safe_sparse_dot(deltas[i], self.coefs_[i].T)
-
+            deltas[i - 1] = safe_sparse_dot(deltas[i], self.coefs_[i].T)
             inplace_derivative = DERIVATIVES[self.activation]
             inplace_derivative(activations[i], deltas[i - 1])
 
@@ -307,6 +343,138 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                 i - 1, n_samples, activations, deltas, coef_grads,
                 intercept_grads)
 
+        if self.fitting:
+            print("CPU iterating: %f ms \n" % ((time.clock() - ts) * 1000))
+            print("CPU Total Backprop: %f ms \n" % ((time.clock() - tss) * 1000))
+        return loss, coef_grads, intercept_grads
+
+    def _backprop_cuda(self, X, y, activations, deltas, coef_grads,
+                  intercept_grads):
+        """Compute the MLP loss function and its corresponding derivatives
+        with respect to each parameter: weights and bias vectors.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix}, shape (n_samples, n_features)
+            The input data.
+
+        y : array-like, shape (n_samples,)
+            The target values.
+
+        activations : list, length = n_layers - 1
+             The ith element of the list holds the values of the ith layer.
+
+        deltas : list, length = n_layers - 1
+            The ith element of the list holds the difference between the
+            activations of the i + 1 layer and the backpropagated error.
+            More specifically, deltas are gradients of loss with respect to z
+            in each layer, where z = wx + b is the value of a particular layer
+            before passing through the activation function
+
+        coef_grad : list, length = n_layers - 1
+            The ith element contains the amount of change used to update the
+            coefficient parameters of the ith layer in an iteration.
+
+        intercept_grads : list, length = n_layers - 1
+            The ith element contains the amount of change used to update the
+            intercept parameters of the ith layer in an iteration.
+
+        Returns
+        -------
+        loss : float
+        coef_grads : list, length = n_layers - 1
+        intercept_grads : list, length = n_layers - 1
+        """
+        n_samples = X.shape[0]
+        tss = time.clock()
+        
+        #pdb.set_trace()
+        # Forward propagate
+        
+        ts = time.clock()
+        activations = self._forward_pass_cuda(activations)
+        if self.fitting:
+            pass
+            #print("GPU Foward pass: %f ms \n" % ((time.clock() - ts) * 1000)) 
+
+
+        
+        # Get loss
+        loss_func_name = self.loss
+        
+        if loss_func_name == 'log_loss' and self.out_activation_ == 'logistic':
+            loss_func_name = 'binary_log_loss'
+        
+        loss_func_name += '_cuda'
+
+        
+        
+        loss = LOSS_FUNCTIONS[loss_func_name](y, activations[-1])
+        # Add L2 regularization term to loss
+
+        ts = time.clock()
+        #if self.fitting:
+        #    print("GPU process loss function: %f ms \n" % ((time.clock() - ts) * 1000)) 
+        #ts = time.clock()
+        values = cp.float64(0)
+        for s in self.cuda_coefs_:
+            #ts = time.clock()
+            ravel = s.ravel()
+            #if self.fitting:
+            #    print("GPU ravel function: %f ms \n" % ((time.clock() - ts) * 1000)) 
+            #ts = time.clock()
+            values += cp.dot(ravel, ravel)
+            #if self.fitting:
+            #    print("GPU dot function: %f ms \n" % ((time.clock() - ts) * 1000)) 
+
+        if self.fitting:
+            pass
+            #print("GPU process regularization function: %f ms \n" % ((time.clock() - ts) * 1000)) 
+            
+        
+        loss += (0.5 * self.alpha) * values.get() / n_samples
+        
+        # Backward propagate
+        last = self.n_layers_ - 2
+
+        # The calculation of delta[last] here works with following
+        # combinations of output activation and loss function:
+        # sigmoid and binary cross entropy, softmax and categorical cross
+        # entropy, and identity with squared loss
+        ts = time.clock()
+
+        deltas[last] = activations[-1] - y
+
+        if self.fitting:
+            pass
+            #print("GPU process loss function: %f ms \n" % ((time.clock() - ts) * 1000)) 
+        
+        
+        ts = time.clock()
+        # Compute gradient for the last layer
+        coef_grads, intercept_grads = self._compute_loss_grad_cuda(
+            last, n_samples, activations, deltas, coef_grads, intercept_grads)
+
+        
+        # Iterate over the hidden layers
+        for i in range(self.n_layers_ - 2, 0, -1):
+            cp.dot(deltas[i], self.cuda_coefs_[i].T, out=deltas[i - 1])
+            
+            #pdb.set_trace()
+            #t_derivative = time.clock()
+            inplace_derivative = DERIVATIVES[self.activation]
+            inplace_derivative(activations[i], deltas[i - 1])
+
+            #print("GPU derivative: %f ms \n" % ((time.clock() - t_derivative) * 1000))
+
+
+            coef_grads, intercept_grads = self._compute_loss_grad_cuda(
+                i - 1, n_samples, activations, deltas, coef_grads,
+                intercept_grads)
+
+        if self.fitting:
+            print("GPU iterating: %f ms \n" % ((time.clock() - ts) * 1000))
+            print("GPU Total Backprop: %f ms \n" % ((time.clock() - tss) * 1000))
         return loss, coef_grads, intercept_grads
 
     def _initialize(self, y, layer_units):
@@ -329,9 +497,8 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         else:
             self.out_activation_ = 'logistic'
 
-        if self.cuda:
+        if self.useCuda:
             self.out_activation_ += '_cuda'
-
         # Initialize coefficient and intercept layers
         self.coefs_ = []
         self.intercepts_ = []
@@ -350,18 +517,19 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                 self.best_validation_score_ = -np.inf
             else:
                 self.best_loss_ = np.inf
+        
+        if self.useCuda:
+            self.cuda_coefs_ = [ cp.array(s,copy=True) for s in self.coefs_ ]
+            self.cuda_intercepts_ = [ cp.array(s,copy=True) for s in self.intercepts_ ]
+                
 
-        if self.cuda:
-            self.coefs_ = [ cp.array(arr,copy=True) for arr in self.coefs_ ] 
-            self.intercepts_ = [ cp.array(arr,copy=True) for arr in self.intercepts_ ] 
 
     def _init_coef(self, fan_in, fan_out):
-        #TODO cp this
         if self.activation == 'logistic':
             # Use the initialization method recommended by
             # Glorot et al.
             init_bound = np.sqrt(2. / (fan_in + fan_out))
-        elif self.activation in ('identity', 'tanh', 'relu','relu_cuda'):
+        elif self.activation in ('identity', 'tanh', 'relu', 'relu_cuda'):
             init_bound = np.sqrt(6. / (fan_in + fan_out))
         else:
             # this was caught earlier, just to make sure
@@ -387,6 +555,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
             raise ValueError("hidden_layer_sizes must be > 0, got %s." %
                              hidden_layer_sizes)
 
+        
         X, y = self._validate_input(X, y, incremental)
         n_samples, n_features = X.shape
 
@@ -431,6 +600,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         intercept_grads = [np.empty(n_fan_out_) for n_fan_out_ in
                            layer_units[1:]]
 
+        #pdb.set_trace()
         # Run the Stochastic optimization solver
         if self.solver in _STOCHASTIC_SOLVERS:
             self._fit_stochastic(X, y, activations, deltas, coef_grads,
@@ -476,7 +646,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
             raise ValueError("epsilon must be > 0, got %s." % self.epsilon)
 
         # raise ValueError if not registered
-        supported_activations = ('identity', 'logistic', 'tanh', 'relu','relu_cuda')
+        supported_activations = ('identity', 'logistic', 'tanh', 'relu', 'relu_cuda')
         if self.activation not in supported_activations:
             raise ValueError("The activation '%s' is not supported. Supported "
                              "activations are %s." % (self.activation,
@@ -530,20 +700,27 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
 
         self._unpack(optimal_parameters)
 
+    def _partial_copy_cuda(self, dst, src, batch_slice):
+        element_size = src.dtype.itemsize
+        src_ptr = cp.cuda.MemoryPointer(src.data.mem, offset=element_size * batch_slice.start)
+        dst.data.copy_from_device(src_ptr, element_size * (batch_slice.stop - batch_slice.start ))
+
     def _fit_stochastic(self, X, y, activations, deltas, coef_grads,
                         intercept_grads, layer_units, incremental):
 
+        #pdb.set_trace()
+        self.fitting = True
         if not incremental or not hasattr(self, '_optimizer'):
             params = self.coefs_ + self.intercepts_
 
             if self.solver == 'sgd':
                 self._optimizer = SGDOptimizer(
                     params, self.learning_rate_init, self.learning_rate,
-                    self.momentum, self.nesterovs_momentum, self.power_t, self.cuda)
+                    self.momentum, self.nesterovs_momentum, self.power_t)
             elif self.solver == 'adam':
                 self._optimizer = AdamOptimizer(
                     params, self.learning_rate_init, self.beta_1, self.beta_2,
-                    self.epsilon,self.cuda)
+                    self.epsilon)
 
         # early_stopping in partial_fit doesn't make sense
         early_stopping = self.early_stopping and not incremental
@@ -565,31 +742,182 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
             batch_size = np.clip(self.batch_size, 1, n_samples)
 
         try:
-            if self.cuda:
-                ## Initialize CUDA memory
-                self.activations = [ cp.array(arr,copy=True) for arr in activations ] 
-                self.deltas = [ cp.array(arr,copy=True) for arr in deltas ] 
-                self.coef_grads = [ cp.array(arr,copy=True) for arr in coef_grads ] 
-                self.intercept_grads = [ cp.array(arr,copy=True) for arr in intercept_grads ] 
+
+            DUMP_INPUT_DATA = False
+            LOAD_FROM_FILE =  False
+            DUMP_TO_FILE =  False
+            PRINT_FIRST_BATCH_TIME = True
+
+            #pdb.set_trace()
+            
+            if self.useCuda:
+                # Prepare CUDA memeory
+                
+
+                # Traning data
+                cuda_X = cp.empty(X.shape, X.dtype)
+                cuda_y = cp.empty(y.shape, y.dtype)
+                
+                
+
+                # activation, we only need part of it
+                cuda_activations = []
+                cuda_activations.append(cp.empty((batch_size, activations[0].shape[1])))
+                for i in range(1, len(activations)):
+                    cuda_activations.append(cp.empty(activations[i].shape))
+
+                # delta, we only need part of it
+                cuda_deltas =  [] 
+                for i in range(1, len(deltas)):
+                    cuda_deltas.append(cp.empty(deltas[i].shape))
+
+                # coef_grads
+                cuda_coef_grads = [ cp.empty(s.shape) for s in coef_grads ]
+                # intercept_grads
+                cuda_intercept_grads = [ cp.empty(s.shape) for s in intercept_grads ]
+                
+            
             for it in range(self.max_iter):
                 X, y = shuffle(X, y, random_state=self._random_state)
-                if self.cuda:
-                    X = cp.array(X,copy=True)
-                    y = cp.array(y,copy=True)
+                
+
+                if self.useCuda:
+                    # Copy shuffled X, y  to GPU
+                    cuda_X.set(X)
+                    cuda_y.set(y)
+
                 accumulated_loss = 0.0
+                
+                batch_time_total = 0.0
+                batch_time_count = 0
+
+                
+                
+
                 for batch_slice in gen_batches(n_samples, batch_size):
-                    activations[0] = X[batch_slice]
-                    batch_loss, coef_grads, intercept_grads = self._backprop(
-                        X[batch_slice], y[batch_slice], activations, deltas,
-                        coef_grads, intercept_grads)
+                    #print("Batch: " + repr(batch_slice) + "\n") 
+
+ 
+                    #pdb.set_trace()
+                    if DUMP_INPUT_DATA:
+                        DUMP_INPUT_DATA = False
+                        # Dump X
+                        X_slice = X[batch_slice]
+                        with open('X_slice.dump','w') as f:
+                            for i in range(0,X_slice.shape[0]):
+                                    for j in range(0, X_slice.shape[1]):
+                                        f.write(repr(X_slice[i][j]))
+                                        f.write("\n")
+                        # Dump y
+                        y_slice = y[batch_slice]
+                        with open('y_slice.dump','w') as f:
+                            for i in range(0,y_slice.shape[0]):
+                                    for j in range(0, y_slice.shape[1]):
+                                        f.write(repr(y_slice[i][j]))
+                                        f.write("\n")
+                        
+                    
+                    
+                    #pdb.set_trace()
+                    if LOAD_FROM_FILE:
+                        # load batch_loss, coef_grads, intercept_grads from file
+                        LOAD_FROM_FILE = False
+                        # Coef
+                        with open('coef_text.dump','r') as f:
+                            for i in range(0,len(coef_grads)):
+                                for j in range(0,coef_grads[i].shape[0]):
+                                    for k in range(0, coef_grads[i].shape[1]):
+                                        coef_grads[i][j][k] = np.float64(f.readline())
+                        # Intercept
+                        with open('intercept_text.dump','r') as f:
+                            for i in range(0,len(intercept_grads)):
+                                for j in range(0,intercept_grads[i].shape[0]):
+                                    intercept_grads[i][j] = np.float64(f.readline())
+                                    
+                        with open('batch_loss.dump','r') as f:
+                            batch_loss = np.float64(f.read())
+
+
+                    else:
+                        # compute them directly
+                        if self.useCuda:
+
+                            #pdb.set_trace()
+                            #self._partial_copy_cuda(cuda_activations[0], cuda_X, batch_slice)
+                            cuda_activations[0] = cuda_X[batch_slice]
+                            
+                            
+                            
+                            ts = time.clock()
+                            batch_loss, coef_grads_cuda_ret, intercept_grads_cuda_ret = self._backprop_cuda(
+                                cuda_X[batch_slice], cuda_y[batch_slice], cuda_activations, cuda_deltas,
+                                cuda_coef_grads, cuda_intercept_grads)
+                            
+                            if PRINT_FIRST_BATCH_TIME:
+                                PRINT_FIRST_BATCH_TIME = False
+                                print("First batch time: %f ms" % (1000 * (time.clock()- ts)))
+                            # Transfer back to CPU
+
+                            coef_grads = [ gpu.get() for gpu in cuda_coef_grads]
+                            intercept_grads = [ gpu.get() for gpu in cuda_intercept_grads]
+                            #pdb.set_trace()
+
+                        else:
+                            activations[0] = X[batch_slice]
+                            ts = time.clock()
+                            batch_loss, coef_grads, intercept_grads = self._backprop(
+                                X[batch_slice], y[batch_slice], activations, deltas,
+                                coef_grads, intercept_grads)
+                            if PRINT_FIRST_BATCH_TIME:
+                                PRINT_FIRST_BATCH_TIME = False
+                                print("First batch time: %f ms" % (1000 * (time.clock()- ts)))
+                            
+                    
+                    
+                    # Dump to file
+                    if DUMP_TO_FILE:
+                        DUMP_TO_FILE = False
+                        # Coef
+                        with open('coef_text.dump','w') as f:
+                            for i in range(0,len(coef_grads)):
+                                for j in range(0,coef_grads[i].shape[0]):
+                                    for k in range(0, coef_grads[i].shape[1]):
+                                        f.write(repr(coef_grads[i][j][k]))
+                                        f.write("\n")
+                        # Intercept
+                        with open('intercept_text.dump','w') as f:
+                            for i in range(0,len(intercept_grads)):
+                                for j in range(0,intercept_grads[i].shape[0]):
+                                    f.write(repr(intercept_grads[i][j]))
+                                    f.write("\n")
+                        # Batch loss
+                        with open('batch_loss.dump','w') as f:
+                            f.write(repr(batch_loss))
+
+                    
+                    # Other stuff
                     accumulated_loss += batch_loss * (batch_slice.stop -
                                                       batch_slice.start)
                     # update weights
                     grads = coef_grads + intercept_grads
-                    # if self.cuda:
-                    #     grads = grads.get()
-                    #TODO: this should port too
-                    self._optimizer.update_params(grads)
+                    
+                    self._optimizer.update_params(grads) 
+
+                    if batch_slice.stop - batch_slice.start ==  batch_size:
+                        batch_time_total += time.clock() - ts
+                        batch_time_count += 1
+                    # Copy new params to GPU
+                    if self.useCuda:
+                        for i in range(0, len(self.coefs_)):
+                            self.cuda_coefs_[i].set(self.coefs_[i])
+                        for i in range(0, len(self.intercepts_)):
+                            self.cuda_intercepts_[i].set(self.intercepts_[i])
+                    if batch_slice.start > 1000:
+                        break # FIXME:force one batch
+                    
+                    
+                
+                print("Avg batch time: %f ms, %d slices, total %f ms" % (batch_time_total * 1000 / batch_time_count , batch_time_count,  batch_time_total * 1000))
 
                 self.n_iter_ += 1
                 self.loss_ = accumulated_loss / X.shape[0]
@@ -632,6 +960,8 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                         "Stochastic Optimizer: Maximum iterations (%d) "
                         "reached and the optimization hasn't converged yet."
                         % self.max_iter, ConvergenceWarning)
+            # Transfer coefs_ and intercepts_ back to CPU
+
         except KeyboardInterrupt:
             warnings.warn("Training interrupted by user.")
 
@@ -639,6 +969,8 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
             # restore best weights
             self.coefs_ = self._best_coefs
             self.intercepts_ = self._best_intercepts
+        
+        self.fitting = False
 
     def _update_no_improvement_count(self, early_stopping, X_val, y_val):
         if early_stopping:
@@ -745,17 +1077,10 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
             activations.append(np.empty((X.shape[0],
                                          layer_units[i + 1])))
         # forward propagate
-        if self.cuda:
-            activations = [cp.array(arr) for arr in activations]
-            activations = self._forward_pass_gpu(activations)
-        else:
-            activations = self._forward_pass(activations)
+        self._forward_pass(activations)
         y_pred = activations[-1]
 
-        if self.cuda:
-            return y_pred.get()
-        else:
-            return y_pred
+        return y_pred
 
 
 class MLPClassifier(BaseMultilayerPerceptron, ClassifierMixin):
@@ -964,9 +1289,10 @@ class MLPClassifier(BaseMultilayerPerceptron, ClassifierMixin):
                  verbose=False, warm_start=False, momentum=0.9,
                  nesterovs_momentum=True, early_stopping=False,
                  validation_fraction=0.1, beta_1=0.9, beta_2=0.999,
-                 epsilon=1e-8, cuda = False):
+                 epsilon=1e-8, useCuda = False):
 
         sup = super(MLPClassifier, self)
+        print("Welcome to my sklearn!")
         sup.__init__(hidden_layer_sizes=hidden_layer_sizes,
                      activation=activation, solver=solver, alpha=alpha,
                      batch_size=batch_size, learning_rate=learning_rate,
@@ -977,7 +1303,7 @@ class MLPClassifier(BaseMultilayerPerceptron, ClassifierMixin):
                      nesterovs_momentum=nesterovs_momentum,
                      early_stopping=early_stopping,
                      validation_fraction=validation_fraction,
-                     beta_1=beta_1, beta_2=beta_2, epsilon=epsilon, cuda = cuda )
+                     beta_1=beta_1, beta_2=beta_2, epsilon=epsilon, useCuda = useCuda)
 
     def _validate_input(self, X, y, incremental):
         X, y = check_X_y(X, y, accept_sparse=['csr', 'csc', 'coo'],
@@ -1003,7 +1329,11 @@ class MLPClassifier(BaseMultilayerPerceptron, ClassifierMixin):
                                  " `self.classes_` has %s. 'y' has %s." %
                                  (self.classes_, classes))
 
+        
         y = self._label_binarizer.transform(y)
+        if self.useCuda:
+            y = y.astype(X.dtype)
+        
         return X, y
 
     def predict(self, X):
@@ -1336,8 +1666,7 @@ class MLPRegressor(BaseMultilayerPerceptron, RegressorMixin):
                  verbose=False, warm_start=False, momentum=0.9,
                  nesterovs_momentum=True, early_stopping=False,
                  validation_fraction=0.1, beta_1=0.9, beta_2=0.999,
-                 epsilon=1e-8, cuda = False):
-                
+                 epsilon=1e-8):
 
         sup = super(MLPRegressor, self)
         sup.__init__(hidden_layer_sizes=hidden_layer_sizes,
@@ -1350,8 +1679,7 @@ class MLPRegressor(BaseMultilayerPerceptron, RegressorMixin):
                      nesterovs_momentum=nesterovs_momentum,
                      early_stopping=early_stopping,
                      validation_fraction=validation_fraction,
-                     beta_1=beta_1, beta_2=beta_2, epsilon=epsilon, cuda = cuda)
-
+                     beta_1=beta_1, beta_2=beta_2, epsilon=epsilon)
 
     def predict(self, X):
         """Predict using the multi-layer perceptron model.
