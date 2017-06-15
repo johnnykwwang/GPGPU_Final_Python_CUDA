@@ -645,22 +645,33 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
 
         self._unpack(optimal_parameters)
 
+
+    def dump_nd_arrays(self, nd_arrays, name):
+        count = 0
+        for nd_array in nd_arrays:
+            cp.asnumpy(nd_array).dump(open("%s_%d.dump" % (name,count), 'wb'))
+            count += 1
+
     def _fit_stochastic(self, X, y, activations, deltas, coef_grads,
                         intercept_grads, layer_units, incremental):
 
+        self.updateByCPU = False
         #pdb.set_trace()
         self.fitting = True
         if not incremental or not hasattr(self, '_optimizer'):
-            params = self.coefs_ + self.intercepts_
+            if self.useCuda and not self.updateByCPU:
+                params = self.cuda_coefs_ + self.cuda_intercepts_
+            else:
+                params = self.coefs_ + self.intercepts_
 
             if self.solver == 'sgd':
                 self._optimizer = SGDOptimizer(
                     params, self.learning_rate_init, self.learning_rate,
-                    self.momentum, self.nesterovs_momentum, self.power_t)
+                    self.momentum, self.nesterovs_momentum, self.power_t, useCuda = self.useCuda and not self.updateByCPU)
             elif self.solver == 'adam':
                 self._optimizer = AdamOptimizer(
                     params, self.learning_rate_init, self.beta_1, self.beta_2,
-                    self.epsilon)
+                    self.epsilon, useCuda = self.useCuda and not self.updateByCPU)
 
         # early_stopping in partial_fit doesn't make sense
         early_stopping = self.early_stopping and not incremental
@@ -783,7 +794,13 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                         if self.useCuda:
                             cuda_activations[0] = cuda_X[batch_slice]
                             
+                            if self.updateByCPU:
+                                for gpu, cpu in zip(self.cuda_coefs_,self.coefs_):
+                                    gpu.set(cpu)
+                                for gpu, cpu in zip(self.cuda_intercepts_,self.intercepts_):
+                                    gpu.set(cpu)
                             
+
                             batch_loss, coef_grads_cuda_ret, intercept_grads_cuda_ret = self._backprop_cuda(
                                 cuda_X[batch_slice], cuda_y[batch_slice], cuda_activations, cuda_deltas,
                                 cuda_coef_grads, cuda_intercept_grads)
@@ -794,19 +811,27 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
 
                             ts = time.clock()
 
-                            ts_tr = time.clock()
-                            # Transfer back to CPU
-                            coef_grads = [ gpu.get() for gpu in cuda_coef_grads]
-                            intercept_grads = [ gpu.get() for gpu in cuda_intercept_grads]
-                            print("transfer time: %f ms" % (1000 * (time.clock()- ts_tr)))
+                            # update weights
+                            if self.updateByCPU:
+                                coef_grads = [gpu.get() for gpu in coef_grads_cuda_ret]
+                                intercept_grads = [gpu.get() for gpu in intercept_grads_cuda_ret]
+
+                                grads = coef_grads + intercept_grads
+                                self._optimizer.update_params(grads) 
+                            else:
+                                grads = coef_grads_cuda_ret + intercept_grads_cuda_ret
+                                self._optimizer.update_params_cuda(grads) 
+                            
+                            
+                            #
+                            #pdb.set_trace()
+                            
                             
 
-                            # update weights
-                            grads = coef_grads + intercept_grads
-                            
                             ts_update = time.clock()
-                            self._optimizer.update_params(grads) 
-                            print("update time: %f ms" % (1000 * (time.clock()- ts_update)))
+                            
+                            
+                            #print("update time: %f ms" % (1000 * (time.clock()- ts_update)))
 
                             if PRINT_FIRST_BATCH_TIME:
                                 PRINT_FIRST_BATCH_TIME = False
@@ -823,16 +848,17 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                             batch_loss, coef_grads, intercept_grads = self._backprop(
                                 X[batch_slice], y[batch_slice], activations, deltas,
                                 coef_grads, intercept_grads)
-                                
+                            
                             
                             
                             ts = time.clock()
                             # update weights
                             grads = coef_grads + intercept_grads
+                            #pdb.set_trace()
                             
                             ts_update = time.clock()
                             self._optimizer.update_params(grads) 
-                            print("update time: %f ms" % (1000 * (time.clock()- ts_update))) 
+                            #print("update time: %f ms" % (1000 * (time.clock()- ts_update))) 
 
                             if PRINT_FIRST_BATCH_TIME:
                                 PRINT_FIRST_BATCH_TIME = False
@@ -870,18 +896,13 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                     
 
                     
-                    # Copy new params to GPU
-                    if self.useCuda:
-                        for i in range(0, len(self.coefs_)):
-                            self.cuda_coefs_[i].set(self.coefs_[i])
-                        for i in range(0, len(self.intercepts_)):
-                            self.cuda_intercepts_[i].set(self.intercepts_[i])
-                    if batch_slice.start > 1000:
-                        break # FIXME:force one batch
+                    #if batch_slice.start > 0:
+                    #    break # FIXME:force one batch
                     
                     
                 
-                print("Avg update time: %f ms, %d slices, total %f ms" % (batch_time_total * 1000 / batch_time_count , batch_time_count,  batch_time_total * 1000))
+
+                #print("Avg update time: %f ms, %d slices, total %f ms" % (batch_time_total * 1000 / batch_time_count , batch_time_count,  batch_time_total * 1000))
 
                 self.n_iter_ += 1
                 self.loss_ = accumulated_loss / X.shape[0]
@@ -924,7 +945,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                         "Stochastic Optimizer: Maximum iterations (%d) "
                         "reached and the optimization hasn't converged yet."
                         % self.max_iter, ConvergenceWarning)
-            # Transfer coefs_ and intercepts_ back to CPU
+            
 
         except KeyboardInterrupt:
             warnings.warn("Training interrupted by user.")
@@ -935,9 +956,19 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
             self.intercepts_ = self._best_intercepts
         
         self.fitting = False
+        
+        #pdb.set_trace()
+        # Transfer coefs_ and intercepts_ back to CPU
+        if self.useCuda and not self.updateByCPU:
+            self.coefs = [gpu_data.get() for gpu_data in self.cuda_coefs_]
+            self.intercepts_ = [gpu_data.get() for gpu_data in self.cuda_intercepts_]
+        self.useCuda = False
 
     def _update_no_improvement_count(self, early_stopping, X_val, y_val):
         if early_stopping:
+            # FIXME: support cuda
+            if self.useCuda:
+                raise(BaseException("NotImplemented"))
             # compute validation score, use that for stopping
             self.validation_scores_.append(self.score(X_val, y_val))
 
