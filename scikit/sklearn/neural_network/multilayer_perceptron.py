@@ -364,13 +364,11 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         coef_grads : list, length = n_layers - 1
         intercept_grads : list, length = n_layers - 1
         """
-        tss = time.clock()
         n_samples = X.shape[0]
 
         # Forward propagate
-        ts = time.clock()
         activations = self._forward_pass_cuda(activations)
-        print("forward time: %f ms" % (1000 * (time.clock()- ts)))
+        
 
         # Get loss
         loss_func_name = self.loss
@@ -387,7 +385,6 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         
         # Add L2 regularization term to loss
         
-        ts = time.clock()
         values = np.float64(0)
         
         for s in self.cuda_coefs_:
@@ -395,7 +392,6 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
 
         
         loss += (0.5 * self.alpha) * values / n_samples
-        print("loss time: %f ms" % (1000 * (time.clock()- ts)))
         
         # Backward propagate
         last = self.n_layers_ - 2
@@ -426,7 +422,6 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                 intercept_grads)
 
         
-        print("backprop time: %f ms" % (1000 * (time.clock()- tss)))
         return loss, coef_grads, intercept_grads
 
     def _initialize(self, y, layer_units):
