@@ -5,7 +5,8 @@
 # License: BSD 3 clause
 
 import numpy as np
-import cupy as cp 
+import cupy as cp
+import pdb
 
 from scipy.special import expit as logistic_sigmoid
 
@@ -76,8 +77,22 @@ def relu(X):
     return X
 
 def relu_cuda(X):
-    cp.clip(X, 0, np.finfo(X.dtype).max, out=X)
+    """Compute the rectified linear unit function inplace.
+
+    Parameters
+    ----------
+    X : {array-like, sparse matrix}, shape (n_samples, n_features)
+        The input data.
+
+    Returns
+    -------
+    X_new : {array-like, sparse matrix}, shape (n_samples, n_features)
+        The transformed data.
+    """
+    cp.clip(X, 0, cp.finfo(X.dtype).max, out=X)
     return X
+
+
 
 def softmax(X):
     """Compute the K-way softmax function inplace.
@@ -99,14 +114,34 @@ def softmax(X):
     return X
 
 def softmax_cuda(X):
+    """Compute the K-way softmax function inplace.
+
+    Parameters
+    ----------
+    X : {array-like, sparse matrix}, shape (n_samples, n_features)
+        The input data.
+
+    Returns
+    -------
+    X_new : {array-like, sparse matrix}, shape (n_samples, n_features)
+        The transformed data.
+    """
     tmp = X - X.max(axis=1)[:, cp.newaxis]
     cp.exp(tmp, out=X)
     X /= X.sum(axis=1)[:, cp.newaxis]
+
     return X
 
-ACTIVATIONS = {'identity': identity, 'tanh': tanh, 'logistic': logistic,
-        'relu': relu, 'relu_cuda':relu_cuda, 'softmax': softmax, 'softmax_cuda': softmax_cuda}
 
+ACTIVATIONS = {'identity': identity, 'tanh': tanh, 'logistic': logistic,
+               'relu': relu, 'softmax': softmax, 'relu_cuda': relu_cuda, 'softmax_cuda': softmax_cuda }
+
+
+kernel_inplace_relu_derivative = cp.ElementwiseKernel(
+    'float64 Z',
+    'float64 delta',
+    'delta = Z == 0 ? 0 : delta',
+    'kernel_inplace_relu_derivative')
 
 def inplace_identity_derivative(Z, delta):
     """Apply the derivative of the identity function: do nothing.
@@ -178,11 +213,30 @@ def inplace_relu_derivative(Z, delta):
     delta[Z == 0] = 0
 
 
+def inplace_relu_derivative_cuda(Z, delta):
+    """Apply the derivative of the relu function.
+
+    It exploits the fact that the derivative is a simple function of the output
+    value from rectified linear units activation function.
+
+    Parameters
+    ----------
+    Z : {array-like, sparse matrix}, shape (n_samples, n_features)
+        The data which was output from the rectified linear units activation
+        function during the forward pass.
+
+    delta : {array-like}, shape (n_samples, n_features)
+         The backpropagated error signal to be modified inplace.
+    """
+    kernel_inplace_relu_derivative(Z, delta)
+    #delta[Z == 0] = 0
+
+
 DERIVATIVES = {'identity': inplace_identity_derivative,
                'tanh': inplace_tanh_derivative,
                'logistic': inplace_logistic_derivative,
                'relu': inplace_relu_derivative,
-               'relu_cuda':inplace_relu_derivative
+               'relu_cuda': inplace_relu_derivative_cuda
                }
 
 
@@ -233,12 +287,37 @@ def log_loss(y_true, y_prob):
     return -np.sum(y_true * np.log(y_prob)) / y_prob.shape[0]
 
 def log_loss_cuda(y_true, y_prob):
+    """Compute Logistic loss for classification.
+
+    Parameters
+    ----------
+    y_true : array-like or label indicator matrix
+        Ground truth (correct) labels.
+
+    y_prob : array-like of float, shape = (n_samples, n_classes)
+        Predicted probabilities, as returned by a classifier's
+        predict_proba method.
+
+    Returns
+    -------
+    loss : float
+        The degree to which the samples are correctly predicted.
+    """
     y_prob = cp.clip(y_prob, 1e-10, 1 - 1e-10)
+
     if y_prob.shape[1] == 1:
         y_prob = cp.append(1 - y_prob, y_prob, axis=1)
+
     if y_true.shape[1] == 1:
         y_true = cp.append(1 - y_true, y_true, axis=1)
-    return -cp.sum(y_true * cp.log(y_prob)) / y_prob.shape[0]
+
+    
+    try:
+        val = -cp.sum(y_true * cp.log(y_prob)) / y_prob.shape[0]
+        return val
+    except:
+        pdb.set_trace()
+    
 
 def binary_log_loss(y_true, y_prob):
     """Compute binary logistic loss for classification.
@@ -265,4 +344,6 @@ def binary_log_loss(y_true, y_prob):
     return -np.sum(y_true * np.log(y_prob) +
                    (1 - y_true) * np.log(1 - y_prob)) / y_prob.shape[0]
 
-LOSS_FUNCTIONS = {'squared_loss': squared_loss, 'log_loss': log_loss, 'log_loss_cuda': log_loss_cuda, 'binary_log_loss': binary_log_loss}
+
+LOSS_FUNCTIONS = {'squared_loss': squared_loss, 'log_loss': log_loss,
+                  'binary_log_loss': binary_log_loss, 'log_loss_cuda': log_loss_cuda}
