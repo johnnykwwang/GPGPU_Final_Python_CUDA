@@ -717,15 +717,21 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                 
             
             for it in range(self.max_iter):
+                ts_iter = time.clock()
+                ts_shuffle = time.clock()
                 X, y = shuffle(X, y, random_state=self._random_state)
-                
+                print("Shuffle time : %f" % ( (time.clock() - ts_shuffle ) * 1000))
+
                 if self.useCuda:
                     # Copy shuffled X, y  to GPU
+                    ts_copy = time.clock()
                     cuda_X.set(X)
                     cuda_y.set(y)
+                    print("Copy shuffled data time : %f" % ( (time.clock() - ts_copy ) * 1000))
 
                 accumulated_loss = 0.0
 
+                ts_batches = time.clock()
                 for batch_slice in gen_batches(n_samples, batch_size):
                     # compute them directly
                     if self.useCuda:
@@ -769,6 +775,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                     accumulated_loss += batch_loss * (batch_slice.stop -
                                                       batch_slice.start)
                     
+                print("Batches time : %f" % ( (time.clock() - ts_batches ) * 1000))
                 self.n_iter_ += 1
                 self.loss_ = accumulated_loss / X.shape[0]
 
@@ -810,6 +817,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                         "Stochastic Optimizer: Maximum iterations (%d) "
                         "reached and the optimization hasn't converged yet."
                         % self.max_iter, ConvergenceWarning)
+                print("Iteration time : %f" % ( (time.clock() - ts_iter ) * 1000))
             
 
         except KeyboardInterrupt:
