@@ -142,7 +142,7 @@ def softmax_cuda(X):
     return X
 
 
-ACTIVATIONS = {'identity': identity, 'tanh': tanh, 'logistic': logistic,
+ACTIVATIONS = {'identity': identity, 'identity_cuda':identity, 'tanh': tanh, 'logistic': logistic,
                'relu': relu, 'softmax': softmax, 'relu_cuda': relu_cuda, 'softmax_cuda': softmax_cuda }
 
 
@@ -364,5 +364,4 @@ def binary_log_loss(y_true, y_prob):
                    (1 - y_true) * np.log(1 - y_prob)) / y_prob.shape[0]
 
 
-LOSS_FUNCTIONS = {'squared_loss': squared_loss, 'log_loss': log_loss,
-                  'binary_log_loss': binary_log_loss, 'log_loss_cuda': log_loss_cuda}
+LOSS_FUNCTIONS = {'squared_loss': squared_loss, 'squared_loss_cuda': squared_loss, 'log_loss': log_loss,'binary_log_loss': binary_log_loss, 'log_loss_cuda': log_loss_cuda}
