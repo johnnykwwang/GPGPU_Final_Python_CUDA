@@ -652,10 +652,13 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
             cp.asnumpy(nd_array).dump(open("%s_%d.dump" % (name,count), 'wb'))
             count += 1
 
+    
+
     def _fit_stochastic(self, X, y, activations, deltas, coef_grads,
                         intercept_grads, layer_units, incremental):
 
         self.updateByCPU = False
+        self.shuffleByCPU = True
         self.fitting = True
         if not incremental or not hasattr(self, '_optimizer'):
             if self.cuda and not self.updateByCPU:
@@ -696,8 +699,15 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                 # Prepare CUDA memeory
                 
                 # Traning data
-                cuda_X = cp.empty(X.shape, X.dtype)
-                cuda_y = cp.empty(y.shape, y.dtype)
+                if not self.shuffleByCPU:
+                    # Need real data
+                    cuda_X_list = [cp.array(X), cp.empty(X.shape, X.dtype)]
+                    cuda_y_list = [cp.array(y), cp.empty(y.shape, y.dtype)]
+                    src_index = 0
+                else:
+                    # buffer only
+                    cuda_X = cp.empty(X.shape, X.dtype)
+                    cuda_y = cp.empty(y.shape, y.dtype)
                 
                 # activation, we only need part of it
                 cuda_activations = []
@@ -715,19 +725,44 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                 # intercept_grads
                 cuda_intercept_grads = [ cp.empty(s.shape) for s in intercept_grads ]
                 
-            
+                # shuffle buffer
+                shuffle_indice = np.arange(0, X.shape[0])
+                shuffle_indice_gpu = cp.empty_like(shuffle_indice)
+
+            ts = time.clock()
+
             for it in range(self.max_iter):
                 ts_iter = time.clock()
                 ts_shuffle = time.clock()
-                X, y = shuffle(X, y, random_state=self._random_state)
-                print("Shuffle time : %f" % ( (time.clock() - ts_shuffle ) * 1000))
 
-                if self.cuda:
-                    # Copy shuffled X, y  to GPU
-                    ts_copy = time.clock()
-                    cuda_X.set(X)
-                    cuda_y.set(y)
-                    print("Copy shuffled data time : %f" % ( (time.clock() - ts_copy ) * 1000))
+                if self.cuda and not self.shuffleByCPU:
+                    # shuffle CPU indice
+                    ts_shuffle_indice = time.clock()
+                    shuffle_indice = shuffle(shuffle_indice, random_state=self._random_state)
+                    print("Index shuffle time : %f" % ( (time.clock() - ts_shuffle_indice ) * 1000))
+                    ts_shuffle = time.clock()
+                    # copy indice to gpu
+                    shuffle_indice_gpu.set(shuffle_indice)
+                    # do shuffle on GPU
+                    dst_index = src_index * -1 + 1
+                    #pdb.set_trace()
+                    cp.take(cuda_X_list[src_index], shuffle_indice_gpu, axis=0 , out=cuda_X_list[dst_index])
+                    cp.take(cuda_y_list[src_index], shuffle_indice_gpu, axis=0 , out=cuda_y_list[dst_index])
+                    print("GPU shuffle time : %f" % ( (time.clock() - ts_shuffle ) * 1000))
+                    # Assign variables
+                    cuda_X = cuda_X_list[dst_index]
+                    cuda_y = cuda_y_list[dst_index]
+
+                else:
+                    X, y = shuffle(X, y, random_state=self._random_state)
+                    print("Shuffle time : %f" % ( (time.clock() - ts_shuffle ) * 1000))
+
+                    if self.cuda:
+                        # Copy shuffled X, y  to GPU
+                        ts_copy = time.clock()
+                        cuda_X.set(X)
+                        cuda_y.set(y)
+                        print("Copy shuffled data time : %f" % ( (time.clock() - ts_copy ) * 1000))
 
                 accumulated_loss = 0.0
 
@@ -774,6 +809,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                     # Other stuff
                     accumulated_loss += batch_loss * (batch_slice.stop -
                                                       batch_slice.start)
+                    
                     
                 print("Batches time : %f" % ( (time.clock() - ts_batches ) * 1000))
                 self.n_iter_ += 1
