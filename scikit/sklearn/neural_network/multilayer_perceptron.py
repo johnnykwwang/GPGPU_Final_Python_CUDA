@@ -53,7 +53,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                  alpha, batch_size, learning_rate, learning_rate_init, power_t,
                  max_iter, loss, shuffle, random_state, tol, verbose,
                  warm_start, momentum, nesterovs_momentum, early_stopping,
-                 validation_fraction, beta_1, beta_2, epsilon, useCuda):
+                 validation_fraction, beta_1, beta_2, epsilon, cuda):
         self.activation = activation
         self.solver = solver
         self.alpha = alpha
@@ -76,7 +76,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         self.beta_1 = beta_1
         self.beta_2 = beta_2
         self.epsilon = epsilon
-        self.useCuda = useCuda
+        self.useCuda = cuda
         self.fitting = False
         if self.useCuda:
             self.activation += '_cuda'
@@ -1169,7 +1169,7 @@ class MLPClassifier(BaseMultilayerPerceptron, ClassifierMixin):
                      nesterovs_momentum=nesterovs_momentum,
                      early_stopping=early_stopping,
                      validation_fraction=validation_fraction,
-                     beta_1=beta_1, beta_2=beta_2, epsilon=epsilon, useCuda = cuda)
+                     beta_1=beta_1, beta_2=beta_2, epsilon=epsilon, cuda = cuda)
 
     def _validate_input(self, X, y, incremental):
         X, y = check_X_y(X, y, accept_sparse=['csr', 'csc', 'coo'],
