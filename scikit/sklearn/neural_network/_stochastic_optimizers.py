@@ -6,7 +6,8 @@
 
 import numpy as np
 import cupy as cp
-from IPython import embed
+import pdb
+import time
 
 
 class BaseOptimizer(object):
@@ -33,6 +34,13 @@ class BaseOptimizer(object):
         self.learning_rate_init = learning_rate_init
         self.learning_rate = float(learning_rate_init)
 
+    def dump_nd_arrays(self, nd_arrays, name):
+        count = 0
+        for nd_array in nd_arrays:
+            cp.asnumpy(nd_array).dump(open("%s_%d.dump" % (name,count), 'wb'))
+            count += 1
+
+
     def update_params(self, grads):
         """Update parameters with given gradients
 
@@ -41,10 +49,25 @@ class BaseOptimizer(object):
         grads : list, length = len(params)
             Containing gradients with respect to coefs_ and intercepts_ in MLP
             model. So length should be aligned with params
-        """
+        """        
         updates = self._get_updates(grads)
         for param, update in zip(self.params, updates):
             param += update
+
+    def update_params_cuda(self, grads):
+        """Update parameters with given gradients
+
+        Parameters
+        ----------
+        grads : list, length = len(params)
+            Containing gradients with respect to coefs_ and intercepts_ in MLP
+            model. So length should be aligned with params
+        """
+        
+        updates = self._get_updates_cuda(grads)
+        for param, update in zip(self.params, updates):
+            cp.add(param,update,out=param)
+
 
     def iteration_ends(self, time_step):
         """Perform update to learning rate and potentially other states at the
@@ -118,18 +141,22 @@ class SGDOptimizer(BaseOptimizer):
     """
 
     def __init__(self, params, learning_rate_init=0.1, lr_schedule='constant',
-                 momentum=0.9, nesterov=True, power_t=0.5, cuda=False ):
+                 momentum=0.9, nesterov=True, power_t=0.5, useCuda = False):
         super(SGDOptimizer, self).__init__(params, learning_rate_init)
 
         self.lr_schedule = lr_schedule
         self.momentum = momentum
         self.nesterov = nesterov
         self.power_t = power_t
-        self.cuda = cuda
-        if cuda:
+        self.useCuda = useCuda
+        
+        if self.useCuda:
+            self.update_buffer_cuda = [cp.zeros_like(param) for param in params]
             self.velocities = [cp.zeros_like(param) for param in params]
         else:
             self.velocities = [np.zeros_like(param) for param in params]
+            
+            
 
     def iteration_ends(self, time_step):
         """Perform updates to learning rate and potential other states at the
@@ -161,6 +188,41 @@ class SGDOptimizer(BaseOptimizer):
             if verbose:
                 print(msg + " Stopping.")
             return True
+
+    kernel_update_velocity = cp.ElementwiseKernel(
+        'float64 momentum, float64 learning_rate, float64 velocity, float64 grad',
+        'float64 output',
+        'output = momentum * velocity - learning_rate * grad',
+        'kernel_update_velocity'
+    )
+
+    def _get_updates_cuda(self, grads):
+        """Get the values used to update params with given gradients
+
+        Parameters
+        ----------
+        grads : list, length = len(coefs_) + len(intercepts_)
+            Containing gradients with respect to coefs_ and intercepts_ in MLP
+            model. So length should be aligned with params
+
+        Returns
+        -------
+        updates : list, length = len(grads)
+            The values to add to params
+        """
+
+        # Update velocities inplace
+        for velocity, grad in zip(self.velocities, grads):
+            self.kernel_update_velocity(self.momentum, self.learning_rate, velocity, grad, velocity)
+
+
+        if self.nesterov:
+            for velocity, grad, update_buffer in zip(self.velocities, grads, self.update_buffer_cuda):
+                self.kernel_update_velocity(self.momentum, self.learning_rate, velocity, grad, update_buffer)
+            return self.update_buffer_cuda
+        else:
+            return self.velocities
+
 
     def _get_updates(self, grads):
         """Get the values used to update params with given gradients
@@ -235,7 +297,7 @@ class AdamOptimizer(BaseOptimizer):
     """
 
     def __init__(self, params, learning_rate_init=0.001, beta_1=0.9,
-                 beta_2=0.999, epsilon=1e-8,cuda=False):
+                 beta_2=0.999, epsilon=1e-8, useCuda = False):
         super(AdamOptimizer, self).__init__(params, learning_rate_init)
 
         self.beta_1 = beta_1
@@ -244,10 +306,7 @@ class AdamOptimizer(BaseOptimizer):
         self.t = 0
         self.ms = [np.zeros_like(param) for param in params]
         self.vs = [np.zeros_like(param) for param in params]
-        self.cuda = cuda
-        if cuda:
-            self.ms = cp.array(self.ms,copy=True)
-            self.vs = cp.array(self.vs,copy=True)
+        self.useCuda = useCuda
 
     def _get_updates(self, grads):
         """Get the values used to update params with given gradients
