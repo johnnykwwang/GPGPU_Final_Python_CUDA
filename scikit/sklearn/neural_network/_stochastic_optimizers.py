@@ -141,16 +141,16 @@ class SGDOptimizer(BaseOptimizer):
     """
 
     def __init__(self, params, learning_rate_init=0.1, lr_schedule='constant',
-                 momentum=0.9, nesterov=True, power_t=0.5, useCuda = False):
+                 momentum=0.9, nesterov=True, power_t=0.5, cuda = False):
         super(SGDOptimizer, self).__init__(params, learning_rate_init)
 
         self.lr_schedule = lr_schedule
         self.momentum = momentum
         self.nesterov = nesterov
         self.power_t = power_t
-        self.useCuda = useCuda
+        self.cuda = cuda
         
-        if self.useCuda:
+        if self.cuda:
             self.update_buffer_cuda = [cp.zeros_like(param) for param in params]
             self.velocities = [cp.zeros_like(param) for param in params]
         else:
@@ -297,7 +297,7 @@ class AdamOptimizer(BaseOptimizer):
     """
 
     def __init__(self, params, learning_rate_init=0.001, beta_1=0.9,
-                 beta_2=0.999, epsilon=1e-8, useCuda = False):
+                 beta_2=0.999, epsilon=1e-8, cuda = False):
         super(AdamOptimizer, self).__init__(params, learning_rate_init)
 
         self.beta_1 = beta_1
@@ -306,7 +306,7 @@ class AdamOptimizer(BaseOptimizer):
         self.t = 0
         self.ms = [np.zeros_like(param) for param in params]
         self.vs = [np.zeros_like(param) for param in params]
-        self.useCuda = useCuda
+        self.cuda = cuda
 
     def _get_updates(self, grads):
         """Get the values used to update params with given gradients

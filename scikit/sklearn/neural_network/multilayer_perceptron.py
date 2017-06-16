@@ -76,9 +76,9 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         self.beta_1 = beta_1
         self.beta_2 = beta_2
         self.epsilon = epsilon
-        self.useCuda = cuda
+        self.cuda = cuda
         self.fitting = False
-        if self.useCuda:
+        if self.cuda:
             self.activation += '_cuda'
 
     def _unpack(self, packed_parameters):
@@ -463,7 +463,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
             else:
                 self.best_loss_ = np.inf
         
-        if self.useCuda:
+        if self.cuda:
             self.cuda_coefs_ = [ cp.array(s,copy=True) for s in self.coefs_ ]
             self.cuda_intercepts_ = [ cp.array(s,copy=True) for s in self.intercepts_ ]
                 
@@ -658,7 +658,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         self.updateByCPU = False
         self.fitting = True
         if not incremental or not hasattr(self, '_optimizer'):
-            if self.useCuda and not self.updateByCPU:
+            if self.cuda and not self.updateByCPU:
                 params = self.cuda_coefs_ + self.cuda_intercepts_
             else:
                 params = self.coefs_ + self.intercepts_
@@ -666,11 +666,11 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
             if self.solver == 'sgd':
                 self._optimizer = SGDOptimizer(
                     params, self.learning_rate_init, self.learning_rate,
-                    self.momentum, self.nesterovs_momentum, self.power_t, useCuda = self.useCuda and not self.updateByCPU)
+                    self.momentum, self.nesterovs_momentum, self.power_t, cuda = self.cuda and not self.updateByCPU)
             elif self.solver == 'adam':
                 self._optimizer = AdamOptimizer(
                     params, self.learning_rate_init, self.beta_1, self.beta_2,
-                    self.epsilon, useCuda = self.useCuda and not self.updateByCPU)
+                    self.epsilon, cuda = self.cuda and not self.updateByCPU)
 
         # early_stopping in partial_fit doesn't make sense
         early_stopping = self.early_stopping and not incremental
@@ -692,7 +692,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
             batch_size = np.clip(self.batch_size, 1, n_samples)
 
         try:
-            if self.useCuda:
+            if self.cuda:
                 # Prepare CUDA memeory
                 
                 # Traning data
@@ -722,7 +722,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                 X, y = shuffle(X, y, random_state=self._random_state)
                 print("Shuffle time : %f" % ( (time.clock() - ts_shuffle ) * 1000))
 
-                if self.useCuda:
+                if self.cuda:
                     # Copy shuffled X, y  to GPU
                     ts_copy = time.clock()
                     cuda_X.set(X)
@@ -734,7 +734,7 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
                 ts_batches = time.clock()
                 for batch_slice in gen_batches(n_samples, batch_size):
                     # compute them directly
-                    if self.useCuda:
+                    if self.cuda:
                         cuda_activations[0] = cuda_X[batch_slice]
                         
                         if self.updateByCPU:
@@ -831,14 +831,14 @@ class BaseMultilayerPerceptron(six.with_metaclass(ABCMeta, BaseEstimator)):
         self.fitting = False
         
         # Transfer coefs_ and intercepts_ back to CPU
-        if self.useCuda and not self.updateByCPU:
+        if self.cuda and not self.updateByCPU:
             self.coefs_ = [gpu_data.get() for gpu_data in self.cuda_coefs_]
             self.intercepts_ = [gpu_data.get() for gpu_data in self.cuda_intercepts_]
 
     def _update_no_improvement_count(self, early_stopping, X_val, y_val):
         if early_stopping:
             # FIXME: support cuda
-            if self.useCuda:
+            if self.cuda:
                 raise(BaseException("NotImplemented"))
             # compute validation score, use that for stopping
             self.validation_scores_.append(self.score(X_val, y_val))
@@ -1197,7 +1197,7 @@ class MLPClassifier(BaseMultilayerPerceptron, ClassifierMixin):
 
         
         y = self._label_binarizer.transform(y)
-        if self.useCuda:
+        if self.cuda:
             y = y.astype(X.dtype)
         
         return X, y
