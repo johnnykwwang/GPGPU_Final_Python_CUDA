@@ -268,6 +268,36 @@ def squared_loss(y_true, y_pred):
     return ((y_true - y_pred) ** 2).mean() / 2
 
 
+kernel_squared_loss = cp.ReductionKernel(
+    'float64 y_true, float64 y_pred',
+    'float64 val',
+    '(y_true - y_pred) * (y_true - y_pred)',
+    'a + b',
+    'val = a',
+    '0.0',
+    'kernel_squared_loss'
+)
+
+def squared_loss_cuda(y_true, y_pred):
+    """Compute the squared loss for regression.
+
+    Parameters
+    ----------
+    y_true : array-like or label indicator matrix
+        Ground truth (correct) values.
+
+    y_pred : array-like or label indicator matrix
+        Predicted values, as returned by a regression estimator.
+
+    Returns
+    -------
+    loss : float
+        The degree to which the samples are correctly predicted.
+    """
+    return kernel_squared_loss(y_true, y_pred) / ( y_true.shape[0] * 2.0)
+
+
+
 def log_loss(y_true, y_prob):
     """Compute Logistic loss for classification.
 
@@ -364,4 +394,4 @@ def binary_log_loss(y_true, y_prob):
                    (1 - y_true) * np.log(1 - y_prob)) / y_prob.shape[0]
 
 
-LOSS_FUNCTIONS = {'squared_loss': squared_loss, 'squared_loss_cuda': squared_loss, 'log_loss': log_loss,'binary_log_loss': binary_log_loss, 'log_loss_cuda': log_loss_cuda}
+LOSS_FUNCTIONS = {'squared_loss': squared_loss, 'squared_loss_cuda': squared_loss_cuda, 'log_loss': log_loss,'binary_log_loss': binary_log_loss, 'log_loss_cuda': log_loss_cuda}
