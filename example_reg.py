@@ -1,6 +1,6 @@
 # import matplotlib.pyplot as plt
 import numpy as np
-from sklearn.datasets import load_boston
+from sklearn.datasets import load_boston, make_regression
 from sklearn.preprocessing import StandardScaler
 
 from sklearn.neural_network import MLPRegressor
@@ -14,11 +14,12 @@ X = np.tile(X,(100,1))
 y = boston.target[:500]
 y = np.tile(y,100)
 
+# X, y = make_regression(n_samples=50000, n_features=100, n_informative=10, n_targets=1, bias=0.0, effective_rank=None, tail_strength=0.5, noise=0.0, shuffle=True, coef=False, random_state=None)
 
 momentum = 0.5
 mlp = MLPRegressor(solver='sgd', max_iter=300, activation='relu',
                            random_state=1, learning_rate_init=0.01,
-                           batch_size=X.shape[0], momentum=momentum,cuda=True)
+                            momentum=momentum,cuda=True)
 t_0 = time.time()
 mlp.fit(X, y)
 t_1 = time.time()
@@ -27,7 +28,7 @@ score_gpu = mlp.score(X, y)
 
 mlp = MLPRegressor(solver='sgd', max_iter=300, activation='relu',
                            random_state=1, learning_rate_init=0.01,
-                           batch_size=X.shape[0], momentum=momentum,cuda=False)
+                            momentum=momentum,cuda=False)
 t_2 = time.time()
 mlp.fit(X, y)
 t_3 = time.time()
