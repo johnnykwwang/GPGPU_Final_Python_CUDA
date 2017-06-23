@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<title>chart created with amCharts | amCharts</title>
+		<meta name="description" content="chart created using amCharts live editor" />
+		
+		<!-- amCharts javascript sources -->
+		<script type="text/javascript" src="https://www.amcharts.com/lib/3/amcharts.js"></script>
+		<script type="text/javascript" src="https://www.amcharts.com/lib/3/serial.js"></script>
+		
+
+		<!-- amCharts javascript code -->
+		<script type="text/javascript">
+			AmCharts.makeChart("chartdiv",
+				{
+					"type": "serial",
+					"categoryField": "layers",
+					"columnSpacing": 13,
+					"columnWidth": 0.38,
+					"maxZoomFactor": 22,
+					"startDuration": 1,
+					"categoryAxis": {
+						"gridPosition": "start",
+						"title": "Number of neurons"
+					},
+					"trendLines": [],
+					"graphs": [
+						{
+							"balloonText": "[[title]] of [[category]]:[[value]]",
+							"fillAlphas": 1,
+							"id": "AmGraph-1",
+							"title": "GPU Speedup",
+							"type": "column",
+							"valueField": "speedup"
+						}
+					],
+					"guides": [],
+					"valueAxes": [
+						{
+							"id": "speedup",
+							"minimum": 0,
+							"minVerticalGap": 37,
+							"title": "Speedup (%)"
+						}
+					],
+					"allLabels": [],
+					"balloon": {},
+					"legend": {
+						"enabled": true,
+						"useGraphSettings": true
+					},
+					"titles": [
+						{
+							"id": "Title-1",
+							"size": 15,
+							"text": "MLPRegressor"
+						}
+					],
+					"dataProvider": [
+						{
+							"layers": "100",
+							"speedup": "234"
+						},
+						{
+							"layers": "150",
+							"speedup": "399"
+						},
+						{
+							"layers": "200",
+							"speedup": "402"
+						},
+						{
+							"layers": "250",
+							"speedup": "443"
+						},
+						{
+							"layers": "300",
+							"speedup": "437"
+						}
+					]
+				}
+			);
+		</script>
+	</head>
+	<body>
+		<div id="chartdiv" style="width: 100%; height: 400px; background-color: #FFFFFF;" ></div>
+	</body>
+</html>
